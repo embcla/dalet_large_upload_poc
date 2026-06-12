@@ -1,0 +1,130 @@
+# Media Upload Platform
+
+A resumable media upload platform built around the [tus](https://tus.io/)
+protocol. This repo currently implements:
+
+- **M0** — repo scaffolding, docker-compose stack (frontend, backend, MinIO),
+  SQLite metadata store, build scripts.
+- **M1** — resumable upload of a single large `.mp4`/`.mkv` file via tus,
+  with client-side and server-side validation (file type, 2GB size limit)
+  and a progress UI.
+
+M2 (pause/resume/heartbeat), M3 (batch queue) and M4 (playback/streaming) are
+not yet implemented.
+
+## Repo layout
+
+```
+backend/            Express + tus + S3 (MinIO) + SQLite, TypeScript
+frontend/           Angular app (standalone components)
+minio/
+  bucket-init/      One-shot init: creates bucket + least-privilege service account
+  policy.json       IAM policy attached to the backend's MinIO service account
+docker-images/      Dockerfiles for backend and frontend images
+build/              Thin docker build wrappers (build-backend.sh, build-frontend.sh, build-all.sh)
+tests/
+  integration/      Jest tests against the running docker-compose stack
+  e2e/              Playwright UI test
+  generators/       Test file generator (fallocate-based)
+docker-compose.yml
+.env                Local-dev credentials/config used by docker-compose
+```
+
+## Quick start
+
+Requires Docker and Docker Compose.
+
+```sh
+docker compose up --build
+```
+
+This starts:
+
+| Service  | URL                          | Notes                                  |
+| -------- | ---------------------------- | --------------------------------------- |
+| frontend | http://localhost:4200        | Angular app, served via nginx           |
+| backend  | http://localhost:3000        | `GET /health`, `GET /config`, tus at `/uploads` |
+| MinIO API | http://localhost:9000       | S3-compatible storage                   |
+| MinIO console | http://localhost:9001   | login with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from `.env` |
+
+The `minio-init` service runs once on startup to create the `media-uploads`
+bucket and a least-privilege service account (scoped via `minio/policy.json`)
+that the backend uses instead of the MinIO root credentials.
+
+Open http://localhost:4200 and upload a `.mp4` or `.mkv` file (up to 2GB) to
+see the progress bar and completion state. Uploaded objects appear in the
+MinIO console under the `media-uploads` bucket; upload metadata is recorded
+in `backend/data/db.sqlite`.
+
+### Incomplete-upload cleanup (§2.11)
+
+Incomplete multipart uploads (e.g. from an aborted upload) are automatically
+cleaned up by MinIO's built-in stale-upload sweep (`api.stale_uploads_expiry`
+/ `api.stale_uploads_cleanup_interval`, defaulting to 24h / 6h). A per-bucket
+`AbortIncompleteMultipartUpload` lifecycle rule was not used because current
+MinIO server releases reject that rule.
+
+## Configuration
+
+`.env` (loaded by docker-compose) holds local-dev defaults: MinIO root
+credentials, the bucket name, the backend's service-account credentials, and
+the frontend's CORS origin. These are dev-only values, not for production.
+
+## Building images without compose
+
+```sh
+build/build-backend.sh
+build/build-frontend.sh
+# or both:
+build/build-all.sh
+```
+
+## Running the tests
+
+### Backend unit tests
+
+```sh
+cd backend
+npm install
+npm test
+```
+
+### Frontend unit tests
+
+The Angular CLI requires Node 22. If your host Node version is older, run via
+Docker:
+
+```sh
+cd frontend
+docker run --rm -v "$(pwd)/..":/workspace -w /workspace/frontend \
+  -u "$(id -u):$(id -g)" -e HOME=/tmp node:22 sh -c "npm install && npx ng test"
+```
+
+(or `npm install && npx ng test` directly if you have Node 22.)
+
+### Integration tests
+
+Runs against the running docker-compose stack (start it first with
+`docker compose up -d --build`). Verifies the upload matrix (`.mp4`/`.mkv` at
+several sizes, checksummed against the MinIO object), the 2GB size limit
+(413), and the file-extension allowlist (4xx).
+
+```sh
+cd tests
+npm install
+npm run test:integration
+
+# also run the large-file matrix (100/200/1000/2000MB, several minutes):
+FULL_MATRIX=1 npm run test:integration
+```
+
+### End-to-end UI test (Playwright)
+
+Also requires the docker-compose stack to be running.
+
+```sh
+cd tests
+npm install
+npx playwright install chromium  # first time only
+npm run test:e2e
+```

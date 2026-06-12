@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.log
+
+# Backend
+backend/data/*.sqlite
+backend/data/*.sqlite-journal
+backend/data/*.sqlite-wal
+backend/data/*.sqlite-shm
+
+# Frontend build output
+frontend/dist/
+frontend/.angular/
+
+# Test artifacts
+tests/generators/tmp/
+tests/e2e/tmp/
+tests/**/playwright-report/
+tests/**/test-results/
+
+# Misc
+.DS_Store
+*.tmp

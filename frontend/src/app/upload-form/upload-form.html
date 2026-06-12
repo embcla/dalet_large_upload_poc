@@ -1,0 +1,32 @@
+<section class="upload">
+  <h2>Upload a video</h2>
+
+  <input type="file" [accept]="acceptAttr" (change)="onFileSelected($event)" />
+
+  @if (validationError()) {
+    <p class="message message--error" role="alert">{{ validationError() }}</p>
+  }
+
+  @if (fileName() && !validationError()) {
+    <div class="file-info">
+      <p class="file-name">{{ fileName() }}</p>
+
+      @if (status() === 'uploading' || status() === 'success') {
+        <progress [value]="bytesUploaded()" [max]="bytesTotal()"></progress>
+        <span class="progress-percent">{{ progressPercent() }}%</span>
+      }
+
+      @switch (status()) {
+        @case ('uploading') {
+          <p class="message message--info">Uploading…</p>
+        }
+        @case ('success') {
+          <p class="message message--success">&#10003; Upload complete</p>
+        }
+        @case ('error') {
+          <p class="message message--error" role="alert">Error: {{ errorMessage() }}</p>
+        }
+      }
+    </div>
+  }
+</section>

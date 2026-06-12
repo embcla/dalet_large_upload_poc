@@ -1,0 +1,24 @@
+{
+  "name": "media-upload-platform-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Integration and E2E tests for the media upload platform, run against the docker-compose stack",
+  "scripts": {
+    "test:integration": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --config integration/jest.config.js",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@playwright/test": "^1.49.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.17.9",
+    "better-sqlite3": "^12.10.0",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.7",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "tus-js-client": "^4.3.1",
+    "typescript": "^5.7.2"
+  }
+}
