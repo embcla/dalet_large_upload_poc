@@ -117,6 +117,93 @@ describe('db', () => {
     });
   });
 
+  describe('M4 schema migration (additive columns, §8)', () => {
+    it('adds bytes_received and the forward-looking columns to a fresh database', () => {
+      const columns = dbModule
+        .getDb()
+        .prepare(`PRAGMA table_info(uploads)`)
+        .all() as Array<{ name: string }>;
+      const names = columns.map((c) => c.name);
+
+      expect(names).toEqual(
+        expect.arrayContaining([
+          'last_seen',
+          'bytes_received',
+          'batch_key',
+          'last_modified',
+          'batch_position',
+          'client_file_hash',
+          'server_file_hash',
+          'hash_verified',
+        ]),
+      );
+    });
+
+    it('defaults bytes_received to 0 and leaves the forward-looking columns NULL', () => {
+      dbModule.insertUpload({
+        id: 'upload-m4-smoke',
+        filename: 'video.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-m4-smoke',
+      });
+
+      const row = dbModule.getUpload('upload-m4-smoke');
+      expect(row?.bytes_received).toBe(0);
+      expect(row?.batch_key).toBeNull();
+      expect(row?.last_modified).toBeNull();
+      expect(row?.batch_position).toBeNull();
+      expect(row?.client_file_hash).toBeNull();
+      expect(row?.server_file_hash).toBeNull();
+      expect(row?.hash_verified).toBeNull();
+    });
+
+    it('is idempotent when run again against an already-migrated database', () => {
+      dbModule.insertUpload({
+        id: 'upload-m4-idempotent',
+        filename: 'video.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-m4-idempotent',
+      });
+
+      expect(() => dbModule.runMigrations()).not.toThrow();
+      expect(dbModule.getUpload('upload-m4-idempotent')?.status).toBe('uploading');
+    });
+
+    it('migrates an existing M0-M3 database (without the new columns) without losing data', () => {
+      const database = dbModule.getDb();
+      database.exec(`DROP TABLE uploads`);
+      database.exec(`
+        CREATE TABLE uploads (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          mime_type TEXT,
+          status TEXT NOT NULL DEFAULT 'uploading',
+          storage_key TEXT NOT NULL,
+          last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      database
+        .prepare(
+          `INSERT INTO uploads (id, filename, size, mime_type, status, storage_key)
+           VALUES ('pre-m4', 'old.mp4', 123, 'video/mp4', 'success', 'pre-m4')`,
+        )
+        .run();
+
+      dbModule.runMigrations();
+
+      const row = dbModule.getUpload('pre-m4');
+      expect(row?.status).toBe('success');
+      expect(row?.size).toBe(123);
+      expect(row?.bytes_received).toBe(0);
+      expect(row?.batch_key).toBeNull();
+    });
+  });
+
   describe('getStaleUploads', () => {
     it('returns only in-progress uploads whose last_seen exceeds the timeout', () => {
       dbModule.insertUpload({

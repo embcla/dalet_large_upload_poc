@@ -29,7 +29,30 @@ export interface UploadRow {
   last_seen: string;
   created_at: string;
   updated_at: string;
+  bytes_received: number;
+  batch_key: string | null;
+  last_modified: number | null;
+  batch_position: number | null;
+  client_file_hash: string | null;
+  server_file_hash: string | null;
+  hash_verified: number | null;
 }
+
+/**
+ * Additive columns introduced after the initial M0 migration (M4, §8).
+ * Applied via ALTER TABLE if missing, so the migration stays idempotent
+ * against databases already populated by M0-M3.
+ */
+const ADDITIVE_COLUMNS: Array<{ name: string; ddl: string }> = [
+  { name: 'last_seen', ddl: 'last_seen TIMESTAMP' },
+  { name: 'bytes_received', ddl: 'bytes_received INTEGER DEFAULT 0' },
+  { name: 'batch_key', ddl: 'batch_key TEXT' },
+  { name: 'last_modified', ddl: 'last_modified INTEGER' },
+  { name: 'batch_position', ddl: 'batch_position INTEGER' },
+  { name: 'client_file_hash', ddl: 'client_file_hash TEXT' },
+  { name: 'server_file_hash', ddl: 'server_file_hash TEXT' },
+  { name: 'hash_verified', ddl: 'hash_verified BOOLEAN' },
+];
 
 export function runMigrations(): void {
   const database = getDb();
@@ -46,6 +69,17 @@ export function runMigrations(): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  const existingColumns = new Set(
+    (database.prepare(`PRAGMA table_info(uploads)`).all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  for (const column of ADDITIVE_COLUMNS) {
+    if (!existingColumns.has(column.name)) {
+      database.exec(`ALTER TABLE uploads ADD COLUMN ${column.ddl}`);
+    }
+  }
 }
 
 export function insertUpload(row: {

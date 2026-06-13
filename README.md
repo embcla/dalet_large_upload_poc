@@ -20,8 +20,19 @@ protocol. This repo currently implements:
   same browser session/tab — a full page reload loses the in-memory upload
   handle and cannot resume, even though the server-side upload remains valid
   until the cleanup job (or abandon beacon) removes it.
+- **M3** — Toxiproxy sits between the frontend and backend (`browser ↔
+  backend`) for network-degradation testing during local dev (see "Upload
+  throttling" below); the dedicated scenario test suite for this milestone
+  is still pending.
+- **M4** — additive SQLite schema migration only (§8): no new endpoints, UI,
+  or behavioral changes. Adds `bytes_received` (read by M5's SSE snapshot)
+  plus forward-looking columns (`batch_key`, `last_modified`,
+  `batch_position`, `client_file_hash`, `server_file_hash`,
+  `hash_verified`) reserved for later milestones. All M0-M3 rows and code
+  paths are unaffected.
 
-M3 (batch queue) and M4 (playback/streaming) are not yet implemented.
+M3's scenario test suite, M5 (backend-pushed live progress via SSE), M6
+(batch queue), and M7 (playback/streaming) are not yet implemented.
 
 ## Repo layout
 
