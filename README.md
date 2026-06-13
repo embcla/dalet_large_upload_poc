@@ -22,8 +22,11 @@ protocol. This repo currently implements:
   until the cleanup job (or abandon beacon) removes it.
 - **M3** — Toxiproxy sits between the frontend and backend (`browser ↔
   backend`) for network-degradation testing during local dev (see "Upload
-  throttling" below); the dedicated scenario test suite for this milestone
-  is still pending.
+  throttling" below). The scenario test suite (§7, `m3-network.test.ts`)
+  injects latency and connection resets via the Toxiproxy admin API and
+  verifies uploads/resumes survive them; an opt-in test confirms a heavily
+  bandwidth-throttled upload is kept alive past `heartbeatTimeoutSeconds` by
+  the client's heartbeat (§7.4/§9.10).
 - **M4** — additive SQLite schema migration only (§8): no new endpoints, UI,
   or behavioral changes. Adds `bytes_received` (read by M5's SSE snapshot)
   plus forward-looking columns (`batch_key`, `last_modified`,
@@ -40,8 +43,7 @@ protocol. This repo currently implements:
   (`idle | uploading | paused | error | success | abandoned`) alongside the
   existing pause/resume/retry controls.
 
-M3's scenario test suite, M6 (batch queue), and M7 (playback/streaming) are
-not yet implemented.
+M6 (batch queue) and M7 (playback/streaming) are not yet implemented.
 
 ## Repo layout
 
@@ -190,6 +192,35 @@ job), and that an upload sent through the throttled proxy (port 3001)
 produces throttled `uploading` progress events with non-decreasing
 `bytesReceived`.
 
+`m3-network.test.ts` (§7) drives the Toxiproxy admin API (port 8474) to add
+toxics on top of the baseline `upload-bandwidth` throttle, on the
+`backend_api` proxy used by `THROTTLED_TUS_ENDPOINT`: a `latency` toxic
+(an upload still completes with a matching checksum), and a `reset_peer`
+toxic (a resume attempt through the proxy fails with a connection-level
+error, the server-side upload is unaffected, and after the toxic is removed
+the upload resumes to completion — also checking via SSE that a fresh
+connection re-syncs to the stalled offset and the eventual `success` event,
+§9.11). Each test removes the toxics it adds and an `afterEach` confirms only
+the baseline toxic remains. An opt-in test (§7.4/§9.10, ~2 minutes) adds a
+tight `bandwidth` toxic (50 KB/s) and uploads a 6MB file with heartbeats sent
+every 15s; it asserts the upload completes as `success` (not `abandoned`)
+even though it takes well over `heartbeatTimeoutSeconds` (90s default), and
+that the SSE stream shows `uploading` throughout with non-decreasing
+`bytesReceived` and a final `success` event.
+
+Because `m3-network.test.ts` mutates shared Toxiproxy state on the
+`backend_api` proxy (e.g. a `reset_peer` toxic would otherwise also reset
+other suites' in-flight uploads through `THROTTLED_TUS_ENDPOINT`), the
+integration Jest config runs all suites in this directory serially
+(`maxWorkers: 1`).
+
+`m5-sse-resilience.test.ts` (§9.9/§9.11) asserts that a fresh
+`GET /progress/stream` connection re-syncs an in-progress upload via its
+snapshot (independent of any prior connection), and that across an
+abort+resume cycle the SSE stream shows the upload as `uploading` (stalled at
+the abort offset, no spurious `success`/`error`/`abandoned`), then resumes to
+a single final `success` event with `bytesReceived === bytesTotal`.
+
 ```sh
 cd tests
 npm install
@@ -197,6 +228,9 @@ npm run test:integration
 
 # also run the large-file matrix (100/200/1000/2000MB, several minutes):
 FULL_MATRIX=1 npm run test:integration
+
+# also run the §7.4/§9.10 bandwidth-throttle/heartbeat scenario (~2 minutes):
+SLOW_SCENARIOS=1 npm run test:integration
 ```
 
 ### End-to-end UI test (Playwright)
@@ -213,3 +247,9 @@ npm run test:e2e
 `m2-resume.spec.ts` exercises the Pause/Resume controls in the browser: it
 delays the upload's PATCH request just long enough to click Pause, confirms
 the `paused` status UI and Resume button appear, then resumes to completion.
+
+`m5-progress.spec.ts` covers the SSE-driven `error`/`abandoned` statuses
+(§9.12): a PATCH that's made to fail shows the `error` message and a Retry
+button, and calling `POST /uploads/:id/abandon` while a session is uploading
+causes the page (via the SSE push, with no user action) to show the
+`abandoned` message.

@@ -23,6 +23,15 @@ export const TUS_ENDPOINT = `${BACKEND_URL}/uploads`;
 export const THROTTLED_BACKEND_URL = process.env.THROTTLED_BACKEND_URL ?? 'http://localhost:3001';
 export const THROTTLED_TUS_ENDPOINT = `${THROTTLED_BACKEND_URL}/uploads`;
 
+/** Rewrites the origin (scheme/host/port) of `url` to `baseUrl`, keeping the path. */
+export function rewriteOrigin(url: string, baseUrl: string): string {
+  const parsed = new URL(url);
+  const base = new URL(baseUrl);
+  parsed.protocol = base.protocol;
+  parsed.host = base.host;
+  return parsed.toString();
+}
+
 const DB_PATH = path.join(__dirname, '../../backend/data/db.sqlite');
 
 const s3 = new S3Client({
@@ -80,6 +89,61 @@ export function tusUpload(
         }
       },
       onSuccess: () => {
+        const url = upload.url ?? '';
+        const uploadId = url.split('/').pop() ?? '';
+        resolve({ uploadId });
+      },
+    });
+
+    upload.start();
+  });
+}
+
+/**
+ * Like `tusUpload`, but also sends `POST /uploads/:id/heartbeat` every
+ * `heartbeatIntervalMs` once the upload's URL is known, mirroring the
+ * frontend's heartbeat behaviour (§2.11/§2.12). Used by the M3 §7.4 test to
+ * keep a slow, throttled upload from being marked `abandoned`.
+ */
+export function tusUploadWithHeartbeat(
+  filePath: string,
+  filename: string,
+  mimeType: string,
+  endpoint: string = TUS_ENDPOINT,
+  heartbeatIntervalMs = 15_000,
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const size = fs.statSync(filePath).size;
+    const stream = fs.createReadStream(filePath);
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    const upload = new tus.Upload(stream, {
+      endpoint,
+      uploadSize: size,
+      retryDelays: null,
+      metadata: { filename, filetype: mimeType },
+      onUploadUrlAvailable: () => {
+        if (timer) {
+          return;
+        }
+        const uploadId = (upload.url ?? '').split('/').pop() ?? '';
+        timer = setInterval(() => {
+          void heartbeat(uploadId);
+        }, heartbeatIntervalMs);
+      },
+      onError: (error) => {
+        clearInterval(timer);
+        const detailed = error as tus.DetailedError;
+        const status = detailed.originalResponse?.getStatus();
+        const body = detailed.originalResponse?.getBody();
+        if (status !== undefined) {
+          resolve({ uploadId: '', errorStatus: status, errorBody: body });
+        } else {
+          reject(error);
+        }
+      },
+      onSuccess: () => {
+        clearInterval(timer);
         const url = upload.url ?? '';
         const uploadId = url.split('/').pop() ?? '';
         resolve({ uploadId });
