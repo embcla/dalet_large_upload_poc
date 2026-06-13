@@ -1,0 +1,8 @@
+[
+  {
+    "name": "backend_api",
+    "listen": "0.0.0.0:3000",
+    "upstream": "backend:3000",
+    "enabled": true
+  }
+]

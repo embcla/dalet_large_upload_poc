@@ -31,6 +31,7 @@ frontend/           Angular app (standalone components)
 minio/
   bucket-init/      One-shot init: creates bucket + least-privilege service account
   policy.json       IAM policy attached to the backend's MinIO service account
+toxiproxy/          Throttles browser -> backend uploads for local dev (see below)
 docker-images/      Dockerfiles for backend and frontend images
 build/              Thin docker build wrappers (build-backend.sh, build-frontend.sh, build-all.sh)
 tests/
@@ -54,7 +55,9 @@ This starts:
 | Service  | URL                          | Notes                                  |
 | -------- | ---------------------------- | --------------------------------------- |
 | frontend | http://localhost:4200        | Angular app, served via nginx           |
-| backend  | http://localhost:3000        | `GET /health`, `GET /config`, tus at `/uploads` |
+| backend (via toxiproxy) | http://localhost:3001 | what the frontend talks to — throttled, see below |
+| backend (direct) | http://localhost:3000 | `GET /health`, `GET /config`, tus at `/uploads` — unthrottled, used by tests |
+| toxiproxy admin API | http://localhost:8474 | inspect/adjust the throttle (`GET /proxies`) |
 | MinIO API | http://localhost:9000       | S3-compatible storage                   |
 | MinIO console | http://localhost:9001   | login with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from `.env` |
 
@@ -66,6 +69,27 @@ Open http://localhost:4200 and upload a `.mp4` or `.mkv` file (up to 2GB) to
 see the progress bar and completion state. Uploaded objects appear in the
 MinIO console under the `media-uploads` bucket; upload metadata is recorded
 in `backend/data/db.sqlite`.
+
+### Upload throttling (dev convenience)
+
+On a local docker-compose stack, uploads are fast enough (LAN/loopback
+speeds) that the progress bar and Pause/Resume controls barely have time to
+render. The `toxiproxy` service sits between the frontend and the backend
+(the frontend's `apiBaseUrl` points at `http://localhost:3001`, which proxies
+to the backend's `:3000`) and applies a `bandwidth` toxic to the
+browser->backend direction, capping upload throughput to
+`UPLOAD_THROTTLE_RATE_KB` (default `20000`, i.e. ~20MB/s — a 1GB upload takes
+~50s).
+
+- Adjust the rate by changing `UPLOAD_THROTTLE_RATE_KB` in `.env` and
+  re-running `docker compose up -d` (re-runs `toxiproxy-init`).
+- Adjust it live without restarting via the admin API, e.g.:
+  ```sh
+  curl -X PATCH http://localhost:8474/proxies/backend_api/toxics/upload-bandwidth \
+    -H 'Content-Type: application/json' -d '{"attributes":{"rate":5000}}'
+  ```
+- This only affects the frontend (port 3001). The backend's own port 3000 —
+  used by the integration/e2e test harness — is unthrottled.
 
 ### Incomplete-upload cleanup (§2.11)
 

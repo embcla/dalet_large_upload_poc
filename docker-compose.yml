@@ -54,6 +54,36 @@ services:
     volumes:
       - ./backend/data:/app/data
 
+  # Sits between the browser and the backend's tus endpoint so upload
+  # bandwidth can be throttled (see toxiproxy-init), making upload progress
+  # visible in the UI. The frontend talks to the backend through this proxy
+  # (port 3001); the backend's own port 3000 remains directly reachable for
+  # the test harness and debugging.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "3001:3000"
+      - "8474:8474"
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  toxiproxy-init:
+    image: curlimages/curl:latest
+    entrypoint: ["/bin/sh", "/toxiproxy-init/init.sh"]
+    depends_on:
+      toxiproxy:
+        condition: service_healthy
+    environment:
+      UPLOAD_THROTTLE_RATE_KB: ${UPLOAD_THROTTLE_RATE_KB}
+    volumes:
+      - ./toxiproxy:/toxiproxy-init:ro
+
   frontend:
     build:
       context: ./frontend
@@ -61,7 +91,10 @@ services:
     ports:
       - "4200:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+      toxiproxy-init:
+        condition: service_completed_successfully
 
 volumes:
   minio-data:
