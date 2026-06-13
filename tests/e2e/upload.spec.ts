@@ -21,6 +21,6 @@ test('uploads a video file and shows progress through to completion', async ({ p
 
   await page.locator('input[type=file]').setInputFiles(FIXTURE_PATH);
 
-  await expect(page.locator('progress')).toBeVisible();
+  await expect(page.locator('.queue-item progress').first()).toBeVisible();
   await expect(page.locator('.message--success')).toHaveText(/upload complete/i, { timeout: 30_000 });
 });

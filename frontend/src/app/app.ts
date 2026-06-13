@@ -1,10 +1,10 @@
 import { Component } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
-import { UploadForm } from './upload-form/upload-form';
+import { UploadQueue } from './upload-queue/upload-queue';
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, UploadForm],
+  imports: [RouterOutlet, UploadQueue],
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })

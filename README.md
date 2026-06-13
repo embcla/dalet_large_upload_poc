@@ -42,8 +42,26 @@ protocol. This repo currently implements:
   `abandoned` event, which the frontend now surfaces as a 6th status
   (`idle | uploading | paused | error | success | abandoned`) alongside the
   existing pause/resume/retry controls.
+- **M6** — batch upload (§10): selecting multiple files queues them and
+  uploads them sequentially, one `tus.Upload` at a time, via a new
+  `UploadQueueService`/`UploadQueue` component (replacing the single-file
+  `UploadForm`). Each file gets its own status badge — the existing
+  `UploadStatus` set is extended with `queued` (not yet started) and
+  `skipped` (user-dismissed after an error/abandon, excluded from the
+  aggregate) — plus a per-file progress bar. An aggregate progress bar sums
+  `bytesReceived`/`bytesTotal` across all non-`skipped` files, driven by the
+  same M5 SSE channel. On a per-file `error` or `abandoned` status, the queue
+  pauses and offers Retry (resumes the same `tus.Upload` from its last
+  offset, §2/M2) or Skip (marks the file `skipped` and advances to the next
+  queued file). The §2.11 heartbeat and abandon-beacon mechanisms are now
+  per-file, generalizing the single-upload versions from M2.
 
-M6 (batch queue) and M7 (playback/streaming) are not yet implemented.
+  Known limitation (temporary — addressed in M8, §12): queue state is
+  in-memory only — a full page reload mid-batch loses the queue and requires
+  restarting the batch selection from scratch. M8 will remove this limitation
+  via the server-held batch manifest and cross-reload resume (§2.12).
+
+M7 (playback/streaming) is not yet implemented.
 
 ## Repo layout
 
@@ -173,6 +191,14 @@ docker run --rm -v "$(pwd)/..":/workspace -w /workspace/frontend \
 
 (or `npm install && npx ng test` directly if you have Node 22.)
 
+`upload-queue.service.spec.ts` covers the M6 batch-queue state machine:
+sequential processing of all files to `success` (aggregate progress reaches
+100%), a mid-queue `error` pausing the queue (remaining files stay `queued`,
+aggregate stalls), Retry resuming the same `tus.Upload` instance, and Skip
+marking a file `skipped` and advancing the queue (excluded from the aggregate
+denominator), plus the ported validation/pause/resume/heartbeat/abandon-beacon/
+`displayStatus` coverage from the old `upload-form.spec.ts`, now per-file.
+
 ### Integration tests
 
 Runs against the running docker-compose stack (start it first with
@@ -253,3 +279,10 @@ the `paused` status UI and Resume button appear, then resumes to completion.
 button, and calling `POST /uploads/:id/abandon` while a session is uploading
 causes the page (via the SSE push, with no user action) to show the
 `abandoned` message.
+
+`m6-batch.spec.ts` (§10) selects 3×10MB files at once: asserts 3
+`.queue-item` rows render, the first is `uploading` while the other two show
+`queued` ("Waiting…"), all three reach `success` ("Upload complete"), and the
+aggregate progress bar reaches 100%. It then captures each upload's id from
+the `Location` header of its `POST /uploads` response and confirms the
+resulting MinIO objects' checksums match the source files.

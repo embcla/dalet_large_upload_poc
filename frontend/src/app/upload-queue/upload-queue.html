@@ -1,0 +1,71 @@
+<section class="upload">
+  <h2>Upload videos</h2>
+
+  <input type="file" multiple [accept]="acceptAttr" (change)="onFilesSelected($event)" />
+
+  @if (queue.validationError()) {
+    <p class="message message--error" role="alert">{{ queue.validationError() }}</p>
+  }
+
+  @if (queue.items().length > 0) {
+    <div class="aggregate">
+      <progress
+        class="aggregate-progress"
+        [value]="queue.aggregateBytesUploaded()"
+        [max]="queue.aggregateBytesTotal()"
+      ></progress>
+      <span class="progress-percent">{{ queue.aggregateProgressPercent() }}%</span>
+    </div>
+
+    <ul class="queue-list">
+      @for (item of queue.items(); track item.id) {
+        <li class="queue-item">
+          <p class="file-name">{{ item.name }}</p>
+          <span class="file-size">{{ formatSize(item.size) }}</span>
+
+          @if (displayStatus(item) !== 'queued' && displayStatus(item) !== 'skipped') {
+            <progress [value]="item.bytesUploaded()" [max]="item.bytesTotal()"></progress>
+            <span class="progress-percent">{{ progressPercent(item) }}%</span>
+          }
+
+          @switch (displayStatus(item)) {
+            @case ('queued') {
+              <p class="message message--queued">Waiting…</p>
+            }
+            @case ('uploading') {
+              <p class="message message--info">
+                <span class="status-icon" aria-hidden="true">&#8645;</span> Uploading…
+              </p>
+              <button type="button" (click)="pause()">Pause</button>
+            }
+            @case ('paused') {
+              <p class="message message--paused">
+                <span class="status-icon" aria-hidden="true">&#10074;&#10074;</span> Paused
+              </p>
+              <button type="button" (click)="resume()">Resume</button>
+            }
+            @case ('success') {
+              <p class="message message--success">&#10003; Upload complete</p>
+            }
+            @case ('error') {
+              <p class="message message--error" role="alert">
+                <span class="status-icon" aria-hidden="true">&#10007;</span> Error: {{ item.errorMessage() }}
+              </p>
+              <button type="button" (click)="resume()">Retry</button>
+              <button type="button" (click)="skip()">Skip</button>
+            }
+            @case ('abandoned') {
+              <p class="message message--abandoned" role="alert">
+                <span class="status-icon" aria-hidden="true">&#8856;</span> Upload abandoned (session timed out).
+              </p>
+              <button type="button" (click)="skip()">Skip</button>
+            }
+            @case ('skipped') {
+              <p class="message message--skipped">Skipped</p>
+            }
+          }
+        </li>
+      }
+    </ul>
+  }
+</section>
