@@ -116,6 +116,20 @@ build/build-all.sh
 
 ## Running the tests
 
+Run everything (backend/frontend unit, integration, e2e) with a single
+consolidated pass/fail summary:
+
+```sh
+./runtests.sh
+```
+
+It requires the docker-compose stack to be running (for the integration and
+e2e suites) and falls back to a `node:22` container for the frontend suite if
+the host Node version is too old. Full output per suite is captured to a temp
+log directory (path printed at the end) for debugging failures. When adding a
+new test suite (e.g. for a future milestone), add it to `runtests.sh` so it
+folds into this summary — see the comment above the `run` calls there.
+
 ### Backend unit tests
 
 ```sh
