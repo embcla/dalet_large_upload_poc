@@ -8,6 +8,12 @@ export const HEARTBEAT_TIMEOUT_SECONDS = 90;
 // How often the cleanup job scans for stale sessions.
 export const CLEANUP_INTERVAL_MS = 60 * 1000;
 
+// M5 §9.4: throttles how often POST_RECEIVE_V2 emits a `progress` SSE event
+// (and updates the bytes_received column) per upload, in ms.
+export const PROGRESS_THROTTLE_MS = 300;
+// M5 §9.8: keepalive comment interval for the SSE stream, in ms.
+export const PROGRESS_KEEPALIVE_MS = 20 * 1000;
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
 
@@ -21,6 +27,9 @@ export const config = {
 
   heartbeatTimeoutSeconds: Number(process.env.HEARTBEAT_TIMEOUT_SECONDS ?? HEARTBEAT_TIMEOUT_SECONDS),
   cleanupIntervalMs: Number(process.env.CLEANUP_INTERVAL_MS ?? CLEANUP_INTERVAL_MS),
+
+  progressThrottleMs: Number(process.env.PROGRESS_THROTTLE_MS ?? PROGRESS_THROTTLE_MS),
+  progressKeepaliveMs: Number(process.env.PROGRESS_KEEPALIVE_MS ?? PROGRESS_KEEPALIVE_MS),
 
   s3: {
     endpoint: process.env.S3_ENDPOINT ?? 'http://localhost:9000',

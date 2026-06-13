@@ -2,8 +2,9 @@ import { Component, computed, inject, OnDestroy, signal } from '@angular/core';
 import * as tus from 'tus-js-client';
 import { environment } from '../../environments/environment';
 import { ConfigService } from '../services/config.service';
+import { ProgressService } from '../services/progress.service';
 
-export type UploadStatus = 'idle' | 'uploading' | 'paused' | 'error' | 'success';
+export type UploadStatus = 'idle' | 'uploading' | 'paused' | 'error' | 'success' | 'abandoned';
 
 // §2.11: while a session is uploading/paused/error, keep the server informed
 // we're still around so its cleanup job doesn't abort the multipart upload.
@@ -17,6 +18,7 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
 })
 export class UploadForm implements OnDestroy {
   private readonly configService = inject(ConfigService);
+  private readonly progressService = inject(ProgressService);
 
   readonly status = signal<UploadStatus>('idle');
   readonly validationError = signal<string | null>(null);
@@ -24,23 +26,41 @@ export class UploadForm implements OnDestroy {
   readonly fileName = signal<string | null>(null);
   readonly bytesUploaded = signal(0);
   readonly bytesTotal = signal(0);
+  private readonly uploadId = signal<string | null>(null);
 
   readonly progressPercent = computed(() => {
     const total = this.bytesTotal();
     return total === 0 ? 0 : Math.round((this.bytesUploaded() / total) * 100);
   });
 
+  /**
+   * The status shown to the user. Terminal states (success/error/abandoned,
+   * §9.12) are driven by the M5 SSE channel once it reports them for the
+   * current upload, since the server may reach those states on its own
+   * (e.g. the cleanup job aborting an abandoned session). Otherwise falls
+   * back to the locally-driven tus status.
+   */
+  readonly displayStatus = computed<UploadStatus>(() => {
+    const id = this.uploadId();
+    const event = id ? this.progressService.events().get(id) : undefined;
+    if (event && (event.status === 'success' || event.status === 'error' || event.status === 'abandoned')) {
+      return event.status;
+    }
+    return this.status();
+  });
+
   private tusUpload?: tus.Upload;
-  private uploadId: string | null = null;
   private heartbeatInterval?: ReturnType<typeof setInterval>;
 
   private readonly handleUnload = (): void => {
-    if (this.uploadId && this.status() !== 'success') {
-      navigator.sendBeacon(`${environment.apiBaseUrl}/uploads/${this.uploadId}/abandon`);
+    const id = this.uploadId();
+    if (id && this.status() !== 'success') {
+      navigator.sendBeacon(`${environment.apiBaseUrl}/uploads/${id}/abandon`);
     }
   };
 
   constructor() {
+    this.progressService.connect();
     window.addEventListener('beforeunload', this.handleUnload);
     window.addEventListener('pagehide', this.handleUnload);
   }
@@ -123,7 +143,7 @@ export class UploadForm implements OnDestroy {
       },
       onUploadUrlAvailable: () => {
         const url = this.tusUpload?.url ?? '';
-        this.uploadId = url.split('/').pop() ?? null;
+        this.uploadId.set(url.split('/').pop() ?? null);
         this.startHeartbeat();
       },
       onProgress: (bytesUploaded, bytesTotal) => {
@@ -148,10 +168,11 @@ export class UploadForm implements OnDestroy {
       return;
     }
     this.heartbeatInterval = setInterval(() => {
-      if (!this.uploadId) {
+      const id = this.uploadId();
+      if (!id) {
         return;
       }
-      fetch(`${environment.apiBaseUrl}/uploads/${this.uploadId}/heartbeat`, {
+      fetch(`${environment.apiBaseUrl}/uploads/${id}/heartbeat`, {
         method: 'POST',
         keepalive: true,
       }).catch(() => {
@@ -175,7 +196,7 @@ export class UploadForm implements OnDestroy {
     this.bytesUploaded.set(0);
     this.bytesTotal.set(0);
     this.tusUpload = undefined;
-    this.uploadId = null;
+    this.uploadId.set(null);
     this.stopHeartbeat();
   }
 }

@@ -204,6 +204,46 @@ describe('db', () => {
     });
   });
 
+  describe('setBytesReceived', () => {
+    it('updates bytes_received for the given upload', () => {
+      dbModule.insertUpload({
+        id: 'upload-progress',
+        filename: 'video.mp4',
+        size: 1000,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-progress',
+      });
+
+      dbModule.setBytesReceived('upload-progress', 512);
+
+      expect(dbModule.getUpload('upload-progress')?.bytes_received).toBe(512);
+    });
+  });
+
+  describe('getNonTerminalUploads', () => {
+    it('returns only uploading/paused rows, not success/error/abandoned', () => {
+      dbModule.insertUpload({
+        id: 'in-progress',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'in-progress',
+      });
+      dbModule.insertUpload({
+        id: 'done',
+        filename: 'b.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'done',
+      });
+      dbModule.markUploadStatus('done', 'success');
+
+      const rows = dbModule.getNonTerminalUploads();
+
+      expect(rows.map((row) => row.id)).toEqual(['in-progress']);
+    });
+  });
+
   describe('getStaleUploads', () => {
     it('returns only in-progress uploads whose last_seen exceeds the timeout', () => {
       dbModule.insertUpload({

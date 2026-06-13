@@ -30,9 +30,18 @@ protocol. This repo currently implements:
   `batch_position`, `client_file_hash`, `server_file_hash`,
   `hash_verified`) reserved for later milestones. All M0-M3 rows and code
   paths are unaffected.
+- **M5** — backend-pushed live progress over Server-Sent Events (§9):
+  `GET /progress/stream` sends a snapshot of all in-progress uploads on
+  connect, then pushes an event per upload as its `bytes_received` changes
+  (throttled to one update per `PROGRESS_THROTTLE_MS`, default 300ms, via
+  `@tus/server`'s `POST_RECEIVE_V2`) and a final event on `success`. The
+  `abandon` endpoint and the cleanup job (§2.11) also broadcast an
+  `abandoned` event, which the frontend now surfaces as a 6th status
+  (`idle | uploading | paused | error | success | abandoned`) alongside the
+  existing pause/resume/retry controls.
 
-M3's scenario test suite, M5 (backend-pushed live progress via SSE), M6
-(batch queue), and M7 (playback/streaming) are not yet implemented.
+M3's scenario test suite, M6 (batch queue), and M7 (playback/streaming) are
+not yet implemented.
 
 ## Repo layout
 
@@ -173,6 +182,13 @@ a checksum-matching object, `POST /uploads/:id/heartbeat` bumps `last_seen`,
 `POST /uploads/:id/abandon` marks a session `abandoned` and aborts its S3
 multipart upload, and `POST /internal/cleanup/run` does the same for sessions
 with a stale heartbeat.
+
+`m5-progress.test.ts` connects to `GET /progress/stream` and asserts the
+snapshot-on-connect for an in-progress upload, the `success`/`abandoned`
+terminal events (the latter via both the `abandon` endpoint and the cleanup
+job), and that an upload sent through the throttled proxy (port 3001)
+produces throttled `uploading` progress events with non-decreasing
+`bytesReceived`.
 
 ```sh
 cd tests

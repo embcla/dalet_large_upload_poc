@@ -5,6 +5,7 @@ import { healthRouter } from './routes/health';
 import { configRouter } from './routes/config';
 import { createUploadsRouter } from './routes/uploads';
 import { createInternalRouter } from './routes/internal';
+import { createProgressRouter } from './progress';
 import { createDatastore, createTusHandler } from './tus';
 
 export function createApp(): Express {
@@ -26,6 +27,7 @@ export function createApp(): Express {
   // /uploads/:id/abandon aren't swallowed by the tus handler below.
   app.use(createUploadsRouter(datastore));
   app.use(createInternalRouter(datastore));
+  app.use(createProgressRouter());
 
   const tusHandler = createTusHandler(datastore);
   app.all('/uploads', tusHandler);

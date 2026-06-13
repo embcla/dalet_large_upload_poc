@@ -126,6 +126,28 @@ export function touchLastSeen(id: string): void {
 }
 
 /**
+ * Records server-confirmed bytes received for an upload (M5 §9.2/§9.6),
+ * read back by the SSE snapshot-on-connect.
+ */
+export function setBytesReceived(id: string, bytesReceived: number): void {
+  const database = getDb();
+  database.prepare(`UPDATE uploads SET bytes_received = @bytesReceived WHERE id = @id`).run({
+    id,
+    bytesReceived,
+  });
+}
+
+/**
+ * Returns uploads that are still in-progress (M5 §9.6 snapshot-on-connect).
+ */
+export function getNonTerminalUploads(): UploadRow[] {
+  const database = getDb();
+  return database
+    .prepare(`SELECT * FROM uploads WHERE status IN ('uploading', 'paused')`)
+    .all() as UploadRow[];
+}
+
+/**
  * Returns uploads that are still marked in-progress but haven't sent a
  * heartbeat within `timeoutSeconds` (§2.11 cleanup job).
  */

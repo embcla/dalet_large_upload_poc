@@ -2,6 +2,7 @@ import type { S3Store } from '@tus/s3-store';
 import { ERRORS } from '@tus/server';
 import { config } from './config';
 import { getStaleUploads, markUploadStatus } from './db';
+import { broadcast } from './progress';
 
 /**
  * Aborts the MinIO multipart upload for `id` and removes the in-progress
@@ -29,6 +30,12 @@ export async function runCleanupOnce(datastore: S3Store): Promise<number> {
   for (const row of stale) {
     await abortUpload(datastore, row.id);
     markUploadStatus(row.id, 'abandoned');
+    broadcast({
+      uploadId: row.id,
+      status: 'abandoned',
+      bytesReceived: row.bytes_received,
+      bytesTotal: row.size,
+    });
   }
 
   return stale.length;

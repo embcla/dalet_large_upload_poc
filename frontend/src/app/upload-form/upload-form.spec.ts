@@ -1,8 +1,10 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { vi } from 'vitest';
 import * as tus from 'tus-js-client';
 import { UploadForm, getExtension, describeError } from './upload-form';
 import { ConfigService, AppConfig } from '../services/config.service';
+import { ProgressService, ProgressEvent } from '../services/progress.service';
 import { environment } from '../../environments/environment';
 
 class FakeConfigService {
@@ -14,6 +16,17 @@ class FakeConfigService {
 
   get(): AppConfig {
     return this.config;
+  }
+}
+
+class FakeProgressService {
+  readonly events = signal<ReadonlyMap<string, ProgressEvent>>(new Map());
+  connect = vi.fn();
+
+  emit(event: ProgressEvent): void {
+    const next = new Map(this.events());
+    next.set(event.uploadId, event);
+    this.events.set(next);
   }
 }
 
@@ -63,6 +76,7 @@ describe('describeError', () => {
 describe('UploadForm', () => {
   let lastUpload: FakeUpload;
   let fixture: ComponentFixture<UploadForm>;
+  let progressService: FakeProgressService;
 
   beforeEach(async () => {
     vi.spyOn(tus, 'Upload').mockImplementation(function (this: FakeUpload, _file: unknown, options: tus.UploadOptions) {
@@ -76,9 +90,14 @@ describe('UploadForm', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response()));
     navigator.sendBeacon = vi.fn().mockReturnValue(true);
 
+    progressService = new FakeProgressService();
+
     await TestBed.configureTestingModule({
       imports: [UploadForm],
-      providers: [{ provide: ConfigService, useClass: FakeConfigService }],
+      providers: [
+        { provide: ConfigService, useClass: FakeConfigService },
+        { provide: ProgressService, useValue: progressService },
+      ],
     }).compileComponents();
   });
 
@@ -215,5 +234,44 @@ describe('UploadForm', () => {
     window.dispatchEvent(new Event('pagehide'));
 
     expect(navigator.sendBeacon).not.toHaveBeenCalled();
+  });
+
+  it('connects to the progress SSE channel on creation', () => {
+    fixture = TestBed.createComponent(UploadForm);
+
+    expect(progressService.connect).toHaveBeenCalled();
+  });
+
+  it('displayStatus falls back to the local status before any SSE event arrives', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+
+    expect(component.displayStatus()).toBe('uploading');
+  });
+
+  it('displayStatus reflects a terminal status pushed over SSE for the current upload (§9.12)', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    makeUploadUrlAvailable('upload-sse-1');
+
+    progressService.emit({ uploadId: 'upload-sse-1', status: 'abandoned', bytesReceived: 50, bytesTotal: 100 });
+
+    expect(component.displayStatus()).toBe('abandoned');
+  });
+
+  it('displayStatus ignores SSE events for a different uploadId', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    makeUploadUrlAvailable('upload-sse-2');
+
+    progressService.emit({ uploadId: 'some-other-upload', status: 'abandoned', bytesReceived: 50, bytesTotal: 100 });
+
+    expect(component.displayStatus()).toBe('uploading');
   });
 });

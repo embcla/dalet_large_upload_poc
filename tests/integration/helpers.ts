@@ -17,6 +17,12 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 export const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 export const TUS_ENDPOINT = `${BACKEND_URL}/uploads`;
 
+// Routed through toxiproxy (§ M5), which throttles upload bandwidth per
+// UPLOAD_THROTTLE_RATE_KB (see toxiproxy/init.sh). Used by the M5 progress
+// tests to slow uploads enough for multiple SSE progress events to land.
+export const THROTTLED_BACKEND_URL = process.env.THROTTLED_BACKEND_URL ?? 'http://localhost:3001';
+export const THROTTLED_TUS_ENDPOINT = `${THROTTLED_BACKEND_URL}/uploads`;
+
 const DB_PATH = path.join(__dirname, '../../backend/data/db.sqlite');
 
 const s3 = new S3Client({
@@ -48,13 +54,18 @@ export interface UploadResult {
  * final Location URL). Rejects with `{errorStatus, errorBody}` info attached
  * if the server refuses the upload (e.g. bad extension, oversized).
  */
-export function tusUpload(filePath: string, filename: string, mimeType: string): Promise<UploadResult> {
+export function tusUpload(
+  filePath: string,
+  filename: string,
+  mimeType: string,
+  endpoint: string = TUS_ENDPOINT,
+): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     const size = fs.statSync(filePath).size;
     const stream = fs.createReadStream(filePath);
 
     const upload = new tus.Upload(stream, {
-      endpoint: TUS_ENDPOINT,
+      endpoint,
       uploadSize: size,
       retryDelays: null,
       metadata: { filename, filetype: mimeType },
@@ -106,14 +117,15 @@ export interface UploadRow {
   size: number;
   status: string;
   last_seen: string;
+  bytes_received: number;
 }
 
 export function getUploadRow(uploadId: string): UploadRow | undefined {
   const db = new Database(DB_PATH, { readonly: true });
   try {
-    return db.prepare('SELECT id, filename, size, status, last_seen FROM uploads WHERE id = ?').get(uploadId) as
-      | UploadRow
-      | undefined;
+    return db
+      .prepare('SELECT id, filename, size, status, last_seen, bytes_received FROM uploads WHERE id = ?')
+      .get(uploadId) as UploadRow | undefined;
   } finally {
     db.close();
   }
@@ -280,6 +292,70 @@ export function resumeUpload(filePath: string, uploadUrl: string): Promise<Uploa
 
     upload.start();
   });
+}
+
+export interface ProgressEvent {
+  uploadId: string;
+  status: string;
+  bytesReceived: number;
+  bytesTotal: number;
+  message?: string;
+}
+
+export interface ProgressStream {
+  /** Events received so far, in order (mutated in place as more arrive). */
+  events: ProgressEvent[];
+  /** Closes the underlying SSE connection. */
+  close: () => void;
+}
+
+/**
+ * Connects to `GET /progress/stream` (M5 §9) and appends every `data:`
+ * payload it receives to `events`. Resolves once the connection is open
+ * (after the initial snapshot has started streaming).
+ */
+export async function openProgressStream(): Promise<ProgressStream> {
+  const events: ProgressEvent[] = [];
+  const controller = new AbortController();
+
+  const res = await fetch(`${BACKEND_URL}/progress/stream`, { signal: controller.signal });
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          return;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            events.push(JSON.parse(line.slice('data: '.length)) as ProgressEvent);
+          }
+        }
+      }
+    } catch {
+      // expected once `close()` aborts the connection
+    }
+  })();
+
+  return { events, close: () => controller.abort() };
+}
+
+/** Polls `predicate` until it returns true or `timeoutMs` elapses. */
+export async function waitFor(predicate: () => boolean, timeoutMs = 5000, intervalMs = 50): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error('waitFor: timed out');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 export function sha256OfFile(filePath: string): Promise<string> {

@@ -1,8 +1,10 @@
 import { Server } from '@tus/server';
+import { EVENTS } from '@tus/utils';
 import { S3Store } from '@tus/s3-store';
 import type { Request, Response, NextFunction } from 'express';
 import { config, isAcceptedExtension } from './config';
-import { insertUpload, markUploadStatus } from './db';
+import { insertUpload, markUploadStatus, setBytesReceived } from './db';
+import { broadcast } from './progress';
 
 export function createDatastore(): S3Store {
   return new S3Store({
@@ -25,6 +27,7 @@ export function createTusHandler(datastore: S3Store) {
     path: '/uploads',
     datastore,
     maxSize: config.maxFileSizeBytes,
+    postReceiveInterval: config.progressThrottleMs,
 
     async onUploadCreate(_req, res, upload) {
       const filename = upload.metadata?.filename ?? '';
@@ -49,8 +52,27 @@ export function createTusHandler(datastore: S3Store) {
 
     async onUploadFinish(_req, res, upload) {
       markUploadStatus(upload.id, 'success');
+      setBytesReceived(upload.id, upload.size ?? 0);
+      broadcast({
+        uploadId: upload.id,
+        status: 'success',
+        bytesReceived: upload.size ?? 0,
+        bytesTotal: upload.size ?? 0,
+      });
       return { res };
     },
+  });
+
+  // M5 §9.4: emits a throttled progress event (and persists bytes_received)
+  // as bytes are written, via POST_RECEIVE_V2 (the non-deprecated event).
+  server.on(EVENTS.POST_RECEIVE_V2, (_req, upload) => {
+    setBytesReceived(upload.id, upload.offset);
+    broadcast({
+      uploadId: upload.id,
+      status: 'uploading',
+      bytesReceived: upload.offset,
+      bytesTotal: upload.size ?? 0,
+    });
   });
 
   return (req: Request, res: Response, _next: NextFunction) => {
