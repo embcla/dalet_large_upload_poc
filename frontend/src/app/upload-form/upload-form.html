@@ -11,20 +11,32 @@
     <div class="file-info">
       <p class="file-name">{{ fileName() }}</p>
 
-      @if (status() === 'uploading' || status() === 'success') {
+      @if (status() === 'uploading' || status() === 'paused' || status() === 'success') {
         <progress [value]="bytesUploaded()" [max]="bytesTotal()"></progress>
         <span class="progress-percent">{{ progressPercent() }}%</span>
       }
 
       @switch (status()) {
         @case ('uploading') {
-          <p class="message message--info">Uploading…</p>
+          <p class="message message--info">
+            <span class="status-icon" aria-hidden="true">&#8645;</span> Uploading…
+          </p>
+          <button type="button" (click)="pause()">Pause</button>
+        }
+        @case ('paused') {
+          <p class="message message--paused">
+            <span class="status-icon" aria-hidden="true">&#10074;&#10074;</span> Paused
+          </p>
+          <button type="button" (click)="resume()">Resume</button>
         }
         @case ('success') {
           <p class="message message--success">&#10003; Upload complete</p>
         }
         @case ('error') {
-          <p class="message message--error" role="alert">Error: {{ errorMessage() }}</p>
+          <p class="message message--error" role="alert">
+            <span class="status-icon" aria-hidden="true">&#10007;</span> Error: {{ errorMessage() }}
+          </p>
+          <button type="button" (click)="resume()">Retry</button>
         }
       }
     </div>

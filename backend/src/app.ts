@@ -3,7 +3,9 @@ import cors from 'cors';
 import { config } from './config';
 import { healthRouter } from './routes/health';
 import { configRouter } from './routes/config';
-import { createTusHandler } from './tus';
+import { createUploadsRouter } from './routes/uploads';
+import { createInternalRouter } from './routes/internal';
+import { createDatastore, createTusHandler } from './tus';
 
 export function createApp(): Express {
   const app = express();
@@ -18,7 +20,14 @@ export function createApp(): Express {
   app.use(healthRouter);
   app.use(configRouter);
 
-  const tusHandler = createTusHandler();
+  const datastore = createDatastore();
+
+  // Mounted before the tus catch-all so /uploads/:id/heartbeat and
+  // /uploads/:id/abandon aren't swallowed by the tus handler below.
+  app.use(createUploadsRouter(datastore));
+  app.use(createInternalRouter(datastore));
+
+  const tusHandler = createTusHandler(datastore);
   app.all('/uploads', tusHandler);
   app.all('/uploads/*', tusHandler);
 

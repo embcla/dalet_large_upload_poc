@@ -4,8 +4,8 @@ import type { Request, Response, NextFunction } from 'express';
 import { config, isAcceptedExtension } from './config';
 import { insertUpload, markUploadStatus } from './db';
 
-export function createTusHandler() {
-  const datastore = new S3Store({
+export function createDatastore(): S3Store {
+  return new S3Store({
     partSize: 8 * 1024 * 1024,
     s3ClientConfig: {
       bucket: config.s3.bucket,
@@ -18,7 +18,9 @@ export function createTusHandler() {
       },
     },
   });
+}
 
+export function createTusHandler(datastore: S3Store) {
   const server = new Server({
     path: '/uploads',
     datastore,

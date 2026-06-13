@@ -14,7 +14,7 @@
     },
     {
       "Effect": "Allow",
-      "Action": ["s3:ListBucket"],
+      "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
       "Resource": ["arn:aws:s3:::media-uploads"]
     }
   ]

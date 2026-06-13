@@ -73,4 +73,88 @@ describe('db', () => {
     const row = dbModule.getUpload('upload-2');
     expect(row?.status).toBe('success');
   });
+
+  describe('touchLastSeen', () => {
+    it('bumps last_seen for an in-progress upload', () => {
+      dbModule.insertUpload({
+        id: 'upload-3',
+        filename: 'video.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-3',
+      });
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = '2000-01-01 00:00:00' WHERE id = 'upload-3'`)
+        .run();
+
+      dbModule.touchLastSeen('upload-3');
+
+      expect(dbModule.getUpload('upload-3')?.last_seen).not.toBe('2000-01-01 00:00:00');
+    });
+
+    it('is a no-op for an upload that already succeeded', () => {
+      dbModule.insertUpload({
+        id: 'upload-4',
+        filename: 'video.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-4',
+      });
+      dbModule.markUploadStatus('upload-4', 'success');
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = '2000-01-01 00:00:00' WHERE id = 'upload-4'`)
+        .run();
+
+      dbModule.touchLastSeen('upload-4');
+
+      expect(dbModule.getUpload('upload-4')?.last_seen).toBe('2000-01-01 00:00:00');
+    });
+
+    it('is a no-op for an unknown upload id', () => {
+      expect(() => dbModule.touchLastSeen('does-not-exist')).not.toThrow();
+    });
+  });
+
+  describe('getStaleUploads', () => {
+    it('returns only in-progress uploads whose last_seen exceeds the timeout', () => {
+      dbModule.insertUpload({
+        id: 'stale',
+        filename: 'stale.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'stale',
+      });
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = datetime('now', '-1 hour') WHERE id = 'stale'`)
+        .run();
+
+      dbModule.insertUpload({
+        id: 'fresh',
+        filename: 'fresh.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'fresh',
+      });
+
+      dbModule.insertUpload({
+        id: 'stale-but-done',
+        filename: 'done.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'stale-but-done',
+      });
+      dbModule.markUploadStatus('stale-but-done', 'success');
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = datetime('now', '-1 hour') WHERE id = 'stale-but-done'`)
+        .run();
+
+      const stale = dbModule.getStaleUploads(90);
+
+      expect(stale.map((row) => row.id)).toEqual(['stale']);
+    });
+  });
 });

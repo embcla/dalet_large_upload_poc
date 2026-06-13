@@ -40,3 +40,18 @@ progress {
 .message--info {
   color: #555;
 }
+
+.message--paused {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.status-icon {
+  display: inline-block;
+}
+
+button {
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}

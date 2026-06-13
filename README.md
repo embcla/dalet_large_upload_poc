@@ -8,9 +8,20 @@ protocol. This repo currently implements:
 - **M1** — resumable upload of a single large `.mp4`/`.mkv` file via tus,
   with client-side and server-side validation (file type, 2GB size limit)
   and a progress UI.
+- **M2** — pause/resume/retry controls, a `paused`/`error` status UI, and
+  session-liveness tracking (§2.11/§2.12): the client sends a heartbeat
+  (`POST /uploads/:id/heartbeat`) every ~20s while uploading or paused, and
+  an `abandon` beacon (`POST /uploads/:id/abandon`) on page unload for any
+  non-success session. A backend interval job aborts the S3 multipart upload
+  and marks the session `abandoned` if no heartbeat is seen within
+  `heartbeatTimeoutSeconds` (default 90s).
 
-M2 (pause/resume/heartbeat), M3 (batch queue) and M4 (playback/streaming) are
-not yet implemented.
+  Known limitation (by design, §2.12): pause/resume only works within the
+  same browser session/tab — a full page reload loses the in-memory upload
+  handle and cannot resume, even though the server-side upload remains valid
+  until the cleanup job (or abandon beacon) removes it.
+
+M3 (batch queue) and M4 (playback/streaming) are not yet implemented.
 
 ## Repo layout
 
@@ -107,7 +118,12 @@ docker run --rm -v "$(pwd)/..":/workspace -w /workspace/frontend \
 Runs against the running docker-compose stack (start it first with
 `docker compose up -d --build`). Verifies the upload matrix (`.mp4`/`.mkv` at
 several sizes, checksummed against the MinIO object), the 2GB size limit
-(413), and the file-extension allowlist (4xx).
+(413), the file-extension allowlist (4xx), and the M2 resume/heartbeat/
+abandon/cleanup flows (`m2-resume.test.ts`): a dropped connection resumes to
+a checksum-matching object, `POST /uploads/:id/heartbeat` bumps `last_seen`,
+`POST /uploads/:id/abandon` marks a session `abandoned` and aborts its S3
+multipart upload, and `POST /internal/cleanup/run` does the same for sessions
+with a stale heartbeat.
 
 ```sh
 cd tests
@@ -128,3 +144,7 @@ npm install
 npx playwright install chromium  # first time only
 npm run test:e2e
 ```
+
+`m2-resume.spec.ts` exercises the Pause/Resume controls in the browser: it
+delays the upload's PATCH request just long enough to click Pause, confirms
+the `paused` status UI and Resume button appear, then resumes to completion.

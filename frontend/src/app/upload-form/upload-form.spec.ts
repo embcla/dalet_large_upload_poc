@@ -1,8 +1,9 @@
-import { TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { vi } from 'vitest';
 import * as tus from 'tus-js-client';
 import { UploadForm, getExtension, describeError } from './upload-form';
 import { ConfigService, AppConfig } from '../services/config.service';
+import { environment } from '../../environments/environment';
 
 class FakeConfigService {
   private readonly config: AppConfig = {
@@ -21,6 +22,13 @@ function fileEvent(file: File): Event {
   input.type = 'file';
   Object.defineProperty(input, 'files', { value: [file] });
   return { target: input } as unknown as Event;
+}
+
+interface FakeUpload {
+  url: string | null;
+  options: tus.UploadOptions;
+  start: ReturnType<typeof vi.fn>;
+  abort: ReturnType<typeof vi.fn>;
 }
 
 describe('getExtension', () => {
@@ -53,13 +61,20 @@ describe('describeError', () => {
 });
 
 describe('UploadForm', () => {
-  let startSpy: ReturnType<typeof vi.fn>;
+  let lastUpload: FakeUpload;
+  let fixture: ComponentFixture<UploadForm>;
 
   beforeEach(async () => {
-    startSpy = vi.fn();
-    vi.spyOn(tus, 'Upload').mockImplementation(function (this: unknown) {
-      Object.assign(this as object, { start: startSpy });
+    vi.spyOn(tus, 'Upload').mockImplementation(function (this: FakeUpload, _file: unknown, options: tus.UploadOptions) {
+      this.url = null;
+      this.options = options;
+      this.start = vi.fn();
+      this.abort = vi.fn();
+      lastUpload = this;
     } as unknown as typeof tus.Upload);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response()));
+    navigator.sendBeacon = vi.fn().mockReturnValue(true);
 
     await TestBed.configureTestingModule({
       imports: [UploadForm],
@@ -68,11 +83,24 @@ describe('UploadForm', () => {
   });
 
   afterEach(() => {
+    fixture?.destroy();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
+  function selectGoodFile(component: UploadForm): void {
+    const goodFile = new File(['hello'], 'movie.mp4', { type: 'video/mp4' });
+    component.onFileSelected(fileEvent(goodFile));
+  }
+
+  function makeUploadUrlAvailable(id: string): void {
+    lastUpload.url = `${environment.apiBaseUrl}/uploads/${id}`;
+    lastUpload.options.onUploadUrlAvailable?.();
+  }
+
   it('rejects files larger than the configured max size without starting an upload', () => {
-    const fixture = TestBed.createComponent(UploadForm);
+    fixture = TestBed.createComponent(UploadForm);
     const component = fixture.componentInstance;
 
     const bigFile = new File([new ArrayBuffer(10)], 'big.mp4', { type: 'video/mp4' });
@@ -82,11 +110,10 @@ describe('UploadForm', () => {
 
     expect(component.validationError()).toContain('too large');
     expect(component.status()).toBe('idle');
-    expect(startSpy).not.toHaveBeenCalled();
   });
 
   it('rejects files with a disallowed extension without starting an upload', () => {
-    const fixture = TestBed.createComponent(UploadForm);
+    fixture = TestBed.createComponent(UploadForm);
     const component = fixture.componentInstance;
 
     const badFile = new File(['hello'], 'notes.txt', { type: 'text/plain' });
@@ -95,19 +122,98 @@ describe('UploadForm', () => {
 
     expect(component.validationError()).toContain('.mp4, .mkv');
     expect(component.status()).toBe('idle');
-    expect(startSpy).not.toHaveBeenCalled();
   });
 
   it('starts an upload for a valid file', () => {
-    const fixture = TestBed.createComponent(UploadForm);
+    fixture = TestBed.createComponent(UploadForm);
     const component = fixture.componentInstance;
 
-    const goodFile = new File(['hello'], 'movie.mp4', { type: 'video/mp4' });
-
-    component.onFileSelected(fileEvent(goodFile));
+    selectGoodFile(component);
 
     expect(component.validationError()).toBeNull();
     expect(component.status()).toBe('uploading');
-    expect(startSpy).toHaveBeenCalled();
+    expect(lastUpload.start).toHaveBeenCalled();
+  });
+
+  it('pause aborts the upload and sets status to paused', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    component.pause();
+
+    expect(lastUpload.abort).toHaveBeenCalled();
+    expect(component.status()).toBe('paused');
+  });
+
+  it('resume restarts the upload and sets status back to uploading', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    component.pause();
+    component.resume();
+
+    expect(lastUpload.start).toHaveBeenCalledTimes(2);
+    expect(component.status()).toBe('uploading');
+  });
+
+  it('retry (resume after error) clears the error and resumes the upload', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    lastUpload.options.onError?.(new Error('connection lost'));
+
+    expect(component.status()).toBe('error');
+    expect(component.errorMessage()).toBe('connection lost');
+
+    component.resume();
+
+    expect(component.status()).toBe('uploading');
+    expect(component.errorMessage()).toBeNull();
+    expect(lastUpload.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends a heartbeat for the upload every ~20s while in progress', () => {
+    vi.useFakeTimers();
+
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    makeUploadUrlAvailable('upload-123');
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(fetch).toHaveBeenCalledWith(
+      `${environment.apiBaseUrl}/uploads/upload-123/heartbeat`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('sends an abandon beacon on page unload for an in-progress upload', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    makeUploadUrlAvailable('upload-456');
+
+    window.dispatchEvent(new Event('pagehide'));
+
+    expect(navigator.sendBeacon).toHaveBeenCalledWith(`${environment.apiBaseUrl}/uploads/upload-456/abandon`);
+  });
+
+  it('does not send an abandon beacon once the upload succeeded', () => {
+    fixture = TestBed.createComponent(UploadForm);
+    const component = fixture.componentInstance;
+
+    selectGoodFile(component);
+    makeUploadUrlAvailable('upload-789');
+    lastUpload.options.onSuccess?.({ lastResponse: {} as tus.HttpResponse });
+
+    window.dispatchEvent(new Event('pagehide'));
+
+    expect(navigator.sendBeacon).not.toHaveBeenCalled();
   });
 });

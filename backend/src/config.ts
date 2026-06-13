@@ -2,6 +2,12 @@ export const ACCEPTED_EXTENSIONS = ['.mp4', '.mkv'] as const;
 export const ACCEPTED_MIME_TYPES = ['video/mp4', 'video/x-matroska'] as const;
 export const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2GB
 
+// §2.11 abandoned-upload cleanup: a session with no heartbeat for this long
+// is considered abandoned and its multipart upload is aborted.
+export const HEARTBEAT_TIMEOUT_SECONDS = 90;
+// How often the cleanup job scans for stale sessions.
+export const CLEANUP_INTERVAL_MS = 60 * 1000;
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
 
@@ -12,6 +18,9 @@ export const config = {
   acceptedMimeTypes: ACCEPTED_MIME_TYPES,
 
   sqlitePath: process.env.SQLITE_PATH ?? './data/db.sqlite',
+
+  heartbeatTimeoutSeconds: Number(process.env.HEARTBEAT_TIMEOUT_SECONDS ?? HEARTBEAT_TIMEOUT_SECONDS),
+  cleanupIntervalMs: Number(process.env.CLEANUP_INTERVAL_MS ?? CLEANUP_INTERVAL_MS),
 
   s3: {
     endpoint: process.env.S3_ENDPOINT ?? 'http://localhost:9000',
@@ -51,5 +60,6 @@ export function publicConfig() {
     maxFileSizeBytes: config.maxFileSizeBytes,
     acceptedExtensions: config.acceptedExtensions,
     acceptedMimeTypes: config.acceptedMimeTypes,
+    heartbeatTimeoutSeconds: config.heartbeatTimeoutSeconds,
   };
 }

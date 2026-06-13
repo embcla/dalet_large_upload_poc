@@ -3,7 +3,13 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import * as tus from 'tus-js-client';
-import { S3Client, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  ListMultipartUploadsCommand,
+} from '@aws-sdk/client-s3';
 import Database from 'better-sqlite3';
 
 dotenv.config({ path: path.join(__dirname, '../../.env') });
@@ -94,12 +100,30 @@ export async function tusCreate(uploadLength: number, filename: string, mimeType
   });
 }
 
-export function getUploadRow(uploadId: string): { id: string; filename: string; size: number; status: string } | undefined {
+export interface UploadRow {
+  id: string;
+  filename: string;
+  size: number;
+  status: string;
+  last_seen: string;
+}
+
+export function getUploadRow(uploadId: string): UploadRow | undefined {
   const db = new Database(DB_PATH, { readonly: true });
   try {
-    return db.prepare('SELECT id, filename, size, status FROM uploads WHERE id = ?').get(uploadId) as
-      | { id: string; filename: string; size: number; status: string }
+    return db.prepare('SELECT id, filename, size, status, last_seen FROM uploads WHERE id = ?').get(uploadId) as
+      | UploadRow
       | undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/** Directly rewrites last_seen, to simulate a session that stopped heartbeating long ago. */
+export function setLastSeen(uploadId: string, sqliteDatetime: string): void {
+  const db = new Database(DB_PATH);
+  try {
+    db.prepare('UPDATE uploads SET last_seen = ? WHERE id = ?').run(sqliteDatetime, uploadId);
   } finally {
     db.close();
   }
@@ -138,6 +162,124 @@ export async function deleteObjects(keys: string[]): Promise<void> {
       s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key })).catch(() => undefined),
     ),
   );
+}
+
+export async function getConfig(): Promise<{ heartbeatTimeoutSeconds: number }> {
+  const res = await fetch(`${BACKEND_URL}/config`);
+  return (await res.json()) as { heartbeatTimeoutSeconds: number };
+}
+
+export async function heartbeat(uploadId: string): Promise<Response> {
+  return fetch(`${TUS_ENDPOINT}/${uploadId}/heartbeat`, { method: 'POST' });
+}
+
+export async function abandon(uploadId: string): Promise<Response> {
+  return fetch(`${TUS_ENDPOINT}/${uploadId}/abandon`, { method: 'POST' });
+}
+
+export async function runCleanup(): Promise<{ cleaned: number }> {
+  const res = await fetch(`${BACKEND_URL}/internal/cleanup/run`, { method: 'POST' });
+  return (await res.json()) as { cleaned: number };
+}
+
+/** Returns the S3 multipart UploadIds currently open for `key`, if any. */
+export async function listMultipartUploadIds(key: string): Promise<string[]> {
+  const res = await s3.send(new ListMultipartUploadsCommand({ Bucket: BUCKET }));
+  return (res.Uploads ?? []).filter((u) => u.Key === key).map((u) => u.UploadId ?? '');
+}
+
+export interface AbortedUpload {
+  uploadUrl: string;
+  uploadId: string;
+  offsetAtAbort: number;
+}
+
+/**
+ * Starts a tus upload and aborts it (closing the connection, §2.4) once at
+ * least `abortAtBytes` have been sent, leaving the upload resumable.
+ */
+export function startUploadAndAbort(
+  filePath: string,
+  filename: string,
+  mimeType: string,
+  abortAtBytes: number,
+): Promise<AbortedUpload> {
+  return new Promise((resolve, reject) => {
+    const size = fs.statSync(filePath).size;
+    const stream = fs.createReadStream(filePath);
+    let settled = false;
+
+    const upload = new tus.Upload(stream, {
+      endpoint: TUS_ENDPOINT,
+      uploadSize: size,
+      retryDelays: null,
+      // Forces tus-js-client to send `abortAtBytes` as a single PATCH and
+      // wait for its response before sending more, so onProgress fires once
+      // that chunk is fully processed server-side and abort() reliably lands
+      // before the next PATCH — without this, a fast loopback connection can
+      // flush the whole file to the socket (and the server can finish
+      // processing it) before onProgress/abort ever runs.
+      chunkSize: abortAtBytes,
+      metadata: { filename, filetype: mimeType },
+      onProgress: (bytesUploaded) => {
+        if (settled || bytesUploaded < abortAtBytes) {
+          return;
+        }
+        settled = true;
+        upload
+          .abort()
+          .then(() => {
+            const url = upload.url ?? '';
+            resolve({ uploadUrl: url, uploadId: url.split('/').pop() ?? '', offsetAtAbort: bytesUploaded });
+          })
+          .catch(reject);
+      },
+      onError: (error) => {
+        if (!settled) {
+          reject(error);
+        }
+      },
+      onSuccess: () => {
+        if (!settled) {
+          reject(new Error('upload completed before it could be aborted'));
+        }
+      },
+    });
+
+    upload.start();
+  });
+}
+
+/** Resumes a previously-aborted upload from its recorded offset to completion. */
+export function resumeUpload(filePath: string, uploadUrl: string): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const size = fs.statSync(filePath).size;
+    const stream = fs.createReadStream(filePath);
+
+    const upload = new tus.Upload(stream, {
+      endpoint: TUS_ENDPOINT,
+      uploadUrl,
+      uploadSize: size,
+      retryDelays: null,
+      onError: (error) => {
+        const detailed = error as tus.DetailedError;
+        const status = detailed.originalResponse?.getStatus();
+        const body = detailed.originalResponse?.getBody();
+        if (status !== undefined) {
+          resolve({ uploadId: '', errorStatus: status, errorBody: body });
+        } else {
+          reject(error);
+        }
+      },
+      onSuccess: () => {
+        const url = upload.url ?? '';
+        const uploadId = url.split('/').pop() ?? '';
+        resolve({ uploadId });
+      },
+    });
+
+    upload.start();
+  });
 }
 
 export function sha256OfFile(filePath: string): Promise<string> {
