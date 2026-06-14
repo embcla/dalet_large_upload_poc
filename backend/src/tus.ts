@@ -3,9 +3,10 @@ import { EVENTS } from '@tus/utils';
 import { S3Store } from '@tus/s3-store';
 import type { Request, Response, NextFunction } from 'express';
 import { config, isAcceptedExtension } from './config';
-import { insertUpload, markUploadStatus, setBytesReceived, setProbedMetadata } from './db';
+import { insertUpload, markUploadStatus, setBytesReceived, setProbedMetadata, setServerFileHash } from './db';
+import { computeServerHash } from './integrity';
 import { probeObject } from './ffprobe';
-import { broadcast } from './progress';
+import { broadcast, maybeBroadcastIntegrity } from './progress';
 
 export function createDatastore(): S3Store {
   return new S3Store({
@@ -40,12 +41,23 @@ export function createTusHandler(datastore: S3Store) {
         };
       }
 
+      // M8 §12.12: every upload belongs to a batch (single files are
+      // "batches of one"), keyed/positioned by the frontend's
+      // `computeBatchKey`/`sortFingerprint`.
+      const metadata = upload.metadata ?? {};
+      const batchKey = metadata.batchKey ?? null;
+      const lastModified = metadata.lastModified !== undefined ? Number(metadata.lastModified) : null;
+      const batchPosition = metadata.batchPosition !== undefined ? Number(metadata.batchPosition) : null;
+
       insertUpload({
         id: upload.id,
         filename,
         size: upload.size ?? 0,
         mimeType: upload.metadata?.filetype ?? null,
         storageKey: upload.id,
+        batchKey,
+        lastModified,
+        batchPosition,
       });
 
       return { res };
@@ -68,6 +80,17 @@ export function createTusHandler(datastore: S3Store) {
         bytesReceived: upload.size ?? 0,
         bytesTotal: upload.size ?? 0,
       });
+
+      // M8 §12.9-12.11: hash the completed object server-side, without
+      // blocking the response — the integrity result is broadcast over SSE
+      // once both the client and server hashes have been recorded.
+      computeServerHash(upload.id)
+        .then((hash) => {
+          const row = setServerFileHash(upload.id, hash);
+          maybeBroadcastIntegrity(row);
+        })
+        .catch(() => {});
+
       return { res };
     },
   });
@@ -82,6 +105,14 @@ export function createTusHandler(datastore: S3Store) {
       bytesReceived: upload.offset,
       bytesTotal: upload.size ?? 0,
     });
+  });
+
+  // M8 §12.3-12.8: also persists bytes_received on every PATCH completion —
+  // a PATCH smaller than one POST_RECEIVE_V2 throttle tick (e.g. a small
+  // resumed chunk) would otherwise leave bytes_received stale for the batch
+  // manifest.
+  server.on(EVENTS.POST_RECEIVE, (_req, _res, upload) => {
+    setBytesReceived(upload.id, upload.offset);
   });
 
   return (req: Request, res: Response, _next: NextFunction) => {

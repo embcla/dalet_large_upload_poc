@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, OnInit, inject } from '@angular/core';
 import { ProgressService } from '../services/progress.service';
 import { QueueItem, UploadQueueService, UploadStatus } from '../services/upload-queue.service';
 import { formatSize } from '../upload-utils';
@@ -9,30 +9,19 @@ import { formatSize } from '../upload-utils';
   templateUrl: './upload-queue.html',
   styleUrl: './upload-queue.scss',
 })
-export class UploadQueue implements OnInit, OnDestroy {
+export class UploadQueue implements OnInit {
   private readonly progressService = inject(ProgressService);
   readonly queue = inject(UploadQueueService);
 
-  private readonly handleUnload = (): void => {
-    this.queue.sendAbandonBeacons();
-  };
-
   ngOnInit(): void {
     this.progressService.connect();
-    window.addEventListener('beforeunload', this.handleUnload);
-    window.addEventListener('pagehide', this.handleUnload);
-  }
-
-  ngOnDestroy(): void {
-    window.removeEventListener('beforeunload', this.handleUnload);
-    window.removeEventListener('pagehide', this.handleUnload);
   }
 
   get acceptAttr(): string {
     return this.queue.acceptAttr;
   }
 
-  onFilesSelected(event: Event): void {
+  async onFilesSelected(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement;
     const files = input.files;
     if (!files || files.length === 0) {
@@ -41,12 +30,17 @@ export class UploadQueue implements OnInit, OnDestroy {
     // Convert to a plain array before resetting `input.value` below — that
     // reset clears the live FileList in place, which would otherwise empty
     // `files` too since it's the same underlying object.
-    this.queue.addFiles(Array.from(files));
+    const fileArray = Array.from(files);
     input.value = '';
+    await this.queue.addFiles(fileArray);
   }
 
   displayStatus(item: QueueItem): UploadStatus {
     return this.queue.displayStatus(item);
+  }
+
+  isVerified(item: QueueItem): boolean {
+    return this.queue.isVerified(item);
   }
 
   progressPercent(item: QueueItem): number {

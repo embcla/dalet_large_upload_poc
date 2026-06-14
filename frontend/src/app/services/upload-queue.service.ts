@@ -1,7 +1,7 @@
-import { Injectable, OnDestroy, WritableSignal, computed, inject, signal } from '@angular/core';
+import { Injectable, WritableSignal, computed, effect, inject, signal } from '@angular/core';
 import * as tus from 'tus-js-client';
 import { environment } from '../../environments/environment';
-import { describeError, getExtension } from '../upload-utils';
+import { bufferToHex, computeBatchKey, describeError, getExtension, sortFingerprint } from '../upload-utils';
 import { ConfigService } from './config.service';
 import { ProgressService } from './progress.service';
 
@@ -13,31 +13,44 @@ export type UploadStatus =
   | 'success'
   | 'abandoned'
   | 'skipped'
-  | 'queued';
+  | 'queued'
+  | 'corrupt';
 
-// §2.11: while a session is uploading/paused/error, keep the server informed
-// we're still around so its cleanup job doesn't abort the multipart upload.
-const HEARTBEAT_INTERVAL_MS = 20_000;
+/** Shape of an entry returned by `GET /batches/:batchKey` (M8 §12.3-12.8). */
+interface BatchManifestEntry {
+  id: string;
+  filename: string;
+  size: number;
+  lastModified: number | null;
+  batchPosition: number | null;
+  status: string;
+  bytesReceived: number;
+  storageKey: string;
+}
 
 export interface QueueItem {
   readonly id: string;
   readonly file: File;
   readonly name: string;
   readonly size: number;
-  /**
-   * `file.lastModified`, captured at selection time. Unused by M6 itself —
-   * carried on the item now because it's part of the `(filename, size,
-   * lastModified)` fingerprint that M8 (§12) uses for `batch_key`
-   * computation and cross-reload batch-manifest matching.
-   */
+  /** `file.lastModified`, captured at selection time — part of the `batch_key` fingerprint (M8 §12.3-12.8). */
   readonly lastModified: number;
+  /** SHA-256 of the batch's sorted `(name, size, lastModified)` fingerprint (M8 §12.3-12.8). */
+  readonly batchKey: string;
+  /** Position within the sorted batch, persisted as `batch_position` (M8 §12.12). */
+  readonly batchPosition: number;
   readonly status: WritableSignal<UploadStatus>;
   readonly bytesUploaded: WritableSignal<number>;
   readonly bytesTotal: WritableSignal<number>;
   readonly uploadId: WritableSignal<string | null>;
   readonly errorMessage: WritableSignal<string | null>;
   tusUpload?: tus.Upload;
-  heartbeatInterval?: ReturnType<typeof setInterval>;
+  /**
+   * Set when this item was reconstructed from a manifest row that was
+   * still `uploading`/`paused` (M8 §12.3-12.8) — `startUpload` resumes this
+   * upload via `uploadUrl` instead of creating a new one.
+   */
+  resumeUploadId?: string;
 }
 
 /**
@@ -47,7 +60,7 @@ export interface QueueItem {
  * `displayStatus` pattern but per `QueueItem`.
  */
 @Injectable({ providedIn: 'root' })
-export class UploadQueueService implements OnDestroy {
+export class UploadQueueService {
   private readonly configService = inject(ConfigService);
   private readonly progressService = inject(ProgressService);
 
@@ -56,15 +69,34 @@ export class UploadQueueService implements OnDestroy {
   readonly activeIndex = signal(-1);
   readonly validationError = signal<string | null>(null);
 
+  constructor() {
+    // M8 §12.1/12.2: on each server-pushed `ping`, tell the server the
+    // active item's batch is still alive (replaces the M2 client heartbeat).
+    effect(() => {
+      if (this.progressService.pings() === 0) {
+        return;
+      }
+      const item = this.activeItem();
+      if (!item) {
+        return;
+      }
+      fetch(`${environment.apiBaseUrl}/batches/${item.batchKey}/pong`, {
+        method: 'POST',
+        keepalive: true,
+      }).catch(() => {});
+    });
+  }
+
   /**
    * The status shown to the user for `item`. A `skipped` item is terminal
    * and local-only (SSE never reports `skipped`), so it's never overridden.
-   * Otherwise, a terminal SSE event (`success`/`error`/`abandoned`) for the
-   * item's `uploadId` wins over the local status — e.g. a server-pushed
-   * `abandoned` while the client still thinks it's `uploading`. A
-   * non-terminal SSE event (`uploading`/`paused`) never overrides the local
-   * status, so a fresher local transition (e.g. `onError`) isn't masked by a
-   * stale in-flight SSE event.
+   * A failed integrity check (M8 §12.9-12.11) overrides everything else with
+   * `corrupt`. Otherwise, a terminal SSE event (`success`/`error`/
+   * `abandoned`) for the item's `uploadId` wins over the local status — e.g.
+   * a server-pushed `abandoned` while the client still thinks it's
+   * `uploading`. A non-terminal SSE event (`uploading`/`paused`) never
+   * overrides the local status, so a fresher local transition (e.g.
+   * `onError`) isn't masked by a stale in-flight SSE event.
    */
   displayStatus(item: QueueItem): UploadStatus {
     const localStatus = item.status();
@@ -74,11 +106,23 @@ export class UploadQueueService implements OnDestroy {
 
     const id = item.uploadId();
     const event = id ? this.progressService.events().get(id) : undefined;
+
+    if (event?.hashVerified === false) {
+      return 'corrupt';
+    }
+
     if (event && (event.status === 'success' || event.status === 'error' || event.status === 'abandoned')) {
       return event.status;
     }
 
     return localStatus;
+  }
+
+  /** Whether `item`'s completed upload passed the M8 §12.9-12.11 integrity check. */
+  isVerified(item: QueueItem): boolean {
+    const id = item.uploadId();
+    const event = id ? this.progressService.events().get(id) : undefined;
+    return event?.hashVerified === true;
   }
 
   /**
@@ -95,7 +139,10 @@ export class UploadQueueService implements OnDestroy {
       }
       const id = item.uploadId();
       const event = id ? events.get(id) : undefined;
-      return sum + (event ? event.bytesReceived : 0);
+      // Manifest-restored `success` items have no SSE event in the current
+      // session (the M5 snapshot only covers non-terminal uploads), but
+      // their bytesUploaded signal is pre-set to file.size (M8 §12.3-12.8).
+      return sum + (event ? event.bytesReceived : item.bytesUploaded());
     }, 0);
   });
 
@@ -113,22 +160,18 @@ export class UploadQueueService implements OnDestroy {
     return total === 0 ? 0 : Math.round((this.aggregateBytesUploaded() / total) * 100);
   });
 
-  ngOnDestroy(): void {
-    for (const item of this.items()) {
-      this.stopHeartbeat(item);
-    }
-  }
-
   get acceptAttr(): string {
     return this.configService.get().acceptedExtensions.join(',');
   }
 
   /**
    * Validates and enqueues `files`. If any file is invalid, sets
-   * `validationError` and adds nothing from this selection. Starts
+   * `validationError` and adds nothing from this selection. Otherwise,
+   * computes the batch's `batch_key` (M8 §12.3-12.8), fetches its manifest
+   * to reconstruct already-completed/in-progress items, and starts
    * processing if the queue was idle.
    */
-  addFiles(files: FileList | File[]): void {
+  async addFiles(files: FileList | File[]): Promise<void> {
     const fileArray = Array.from(files);
     if (fileArray.length === 0) {
       return;
@@ -147,7 +190,15 @@ export class UploadQueueService implements OnDestroy {
     }
 
     this.validationError.set(null);
-    const newItems = fileArray.map((file) => this.createItem(file));
+
+    const sorted = sortFingerprint(fileArray);
+    const batchKey = await computeBatchKey(sorted);
+    const manifest = await this.fetchManifest(batchKey);
+    const manifestByPosition = new Map(manifest.map((entry) => [entry.batchPosition, entry]));
+
+    const newItems = sorted.map((file, position) =>
+      this.createItem(file, batchKey, position, manifestByPosition.get(position)),
+    );
     this.items.set([...this.items(), ...newItems]);
 
     if (this.activeIndex() === -1) {
@@ -176,7 +227,7 @@ export class UploadQueueService implements OnDestroy {
     item.tusUpload.start();
   }
 
-  /** Marks the active (errored/abandoned) file as skipped and advances the queue. */
+  /** Marks the active (errored/abandoned/corrupt) file as skipped and advances the queue. */
   skip(): void {
     const item = this.activeItem();
     if (!item) {
@@ -184,27 +235,7 @@ export class UploadQueueService implements OnDestroy {
     }
     item.tusUpload?.abort();
     item.status.set('skipped');
-    this.stopHeartbeat(item);
     this.processNext();
-  }
-
-  /**
-   * §2.11: notify the server that any non-terminal item is being abandoned
-   * (e.g. on page unload), generalizing the single-file abandon beacon to
-   * the whole queue.
-   */
-  sendAbandonBeacons(): void {
-    for (const item of this.items()) {
-      const id = item.uploadId();
-      if (!id) {
-        continue;
-      }
-      const status = this.displayStatus(item);
-      if (status === 'success' || status === 'skipped') {
-        continue;
-      }
-      navigator.sendBeacon(`${environment.apiBaseUrl}/uploads/${id}/abandon`);
-    }
   }
 
   private activeItem(): QueueItem | undefined {
@@ -212,19 +243,63 @@ export class UploadQueueService implements OnDestroy {
     return index === -1 ? undefined : this.items()[index];
   }
 
-  private createItem(file: File): QueueItem {
-    return {
+  private async fetchManifest(batchKey: string): Promise<BatchManifestEntry[]> {
+    try {
+      const res = await fetch(`${environment.apiBaseUrl}/batches/${batchKey}`);
+      if (!res.ok) {
+        return [];
+      }
+      return (await res.json()) as BatchManifestEntry[];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Builds a queue item for `file` at `position` in the batch. If
+   * `manifestEntry` is a completed (`success`) row, the item starts already
+   * done with no `tus.Upload`. If it's still `uploading`/`paused`, the item
+   * is queued for resume via `uploadUrl` (`startUpload`). Otherwise (no
+   * entry, or `abandoned`/`error`), it's a normal fresh upload.
+   */
+  private createItem(
+    file: File,
+    batchKey: string,
+    batchPosition: number,
+    manifestEntry?: BatchManifestEntry,
+  ): QueueItem {
+    const item: QueueItem = {
       id: crypto.randomUUID(),
       file,
       name: file.name,
       size: file.size,
       lastModified: file.lastModified,
+      batchKey,
+      batchPosition,
       status: signal<UploadStatus>('queued'),
       bytesUploaded: signal(0),
       bytesTotal: signal(file.size),
       uploadId: signal<string | null>(null),
       errorMessage: signal<string | null>(null),
     };
+
+    if (!manifestEntry || manifestEntry.status === 'abandoned' || manifestEntry.status === 'error') {
+      return item;
+    }
+
+    if (manifestEntry.status === 'success') {
+      item.status.set('success');
+      item.uploadId.set(manifestEntry.id);
+      item.bytesUploaded.set(file.size);
+      item.bytesTotal.set(file.size);
+      return item;
+    }
+
+    // uploading/paused: resume on its turn (still status 'queued' until then)
+    item.uploadId.set(manifestEntry.id);
+    item.bytesUploaded.set(manifestEntry.bytesReceived);
+    item.resumeUploadId = manifestEntry.id;
+    return item;
   }
 
   private validate(file: File): string | null {
@@ -257,17 +332,19 @@ export class UploadQueueService implements OnDestroy {
   }
 
   private startUpload(item: QueueItem): void {
-    item.tusUpload = new tus.Upload(item.file, {
+    const options: tus.UploadOptions = {
       endpoint: `${environment.apiBaseUrl}/uploads`,
       retryDelays: null,
       metadata: {
         filename: item.file.name,
         filetype: item.file.type,
+        batchKey: item.batchKey,
+        lastModified: String(item.lastModified),
+        batchPosition: String(item.batchPosition),
       },
       onUploadUrlAvailable: () => {
         const url = item.tusUpload?.url ?? '';
         item.uploadId.set(url.split('/').pop() ?? null);
-        this.startHeartbeat(item);
       },
       onProgress: (bytesUploaded, bytesTotal) => {
         item.bytesUploaded.set(bytesUploaded);
@@ -275,45 +352,46 @@ export class UploadQueueService implements OnDestroy {
       },
       onSuccess: () => {
         item.status.set('success');
-        this.stopHeartbeat(item);
         // Advance immediately on local onSuccess rather than waiting for
         // the (throttled, async) SSE confirmation.
         this.processNext();
+        // M8 §12.9-12.11: fire-and-forget, doesn't block queue progression.
+        void this.verifyIntegrity(item);
       },
       onError: (error) => {
         item.status.set('error');
         item.errorMessage.set(describeError(error));
-        this.stopHeartbeat(item);
         // Queue pauses here: the UI offers Retry/Skip for this item.
       },
-    });
+    };
 
+    // M8 §12.3-12.8: cross-reload resume — skip the creation POST and
+    // HEAD-then-PATCH from the manifest's reported offset.
+    if (item.resumeUploadId) {
+      options.uploadUrl = `${environment.apiBaseUrl}/uploads/${item.resumeUploadId}`;
+    }
+
+    item.tusUpload = new tus.Upload(item.file, options);
     item.tusUpload.start();
   }
 
-  private startHeartbeat(item: QueueItem): void {
-    if (item.heartbeatInterval) {
+  /** Computes the completed file's SHA-256 and posts it for server-side reconciliation (M8 §12.9-12.11). */
+  private async verifyIntegrity(item: QueueItem): Promise<void> {
+    const id = item.uploadId();
+    if (!id) {
       return;
     }
-    item.heartbeatInterval = setInterval(() => {
-      const id = item.uploadId();
-      if (!id) {
-        return;
-      }
-      fetch(`${environment.apiBaseUrl}/uploads/${id}/heartbeat`, {
+    try {
+      const buffer = await item.file.arrayBuffer();
+      const digest = await crypto.subtle.digest('SHA-256', buffer);
+      const hash = bufferToHex(digest);
+      await fetch(`${environment.apiBaseUrl}/uploads/${id}/client-hash`, {
         method: 'POST',
-        keepalive: true,
-      }).catch(() => {
-        // Best-effort: a missed heartbeat just brings the session closer to
-        // the server-side cleanup timeout.
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash }),
       });
-    }, HEARTBEAT_INTERVAL_MS);
-  }
-
-  private stopHeartbeat(item: QueueItem): void {
-    if (item.heartbeatInterval) {
-      clearInterval(item.heartbeatInterval);
-      item.heartbeatInterval = undefined;
+    } catch {
+      // Best-effort: a failed hash post just leaves hash_verified null.
     }
   }
 }

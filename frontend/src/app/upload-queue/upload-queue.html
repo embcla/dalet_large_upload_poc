@@ -45,7 +45,12 @@
               <button type="button" (click)="resume()">Resume</button>
             }
             @case ('success') {
-              <p class="message message--success">&#10003; Upload complete</p>
+              <p class="message message--success">
+                &#10003; Upload complete
+                @if (isVerified(item)) {
+                  <span class="badge badge--verified">&#10003; verified</span>
+                }
+              </p>
             }
             @case ('error') {
               <p class="message message--error" role="alert">
@@ -62,6 +67,12 @@
             }
             @case ('skipped') {
               <p class="message message--skipped">Skipped</p>
+            }
+            @case ('corrupt') {
+              <p class="message message--corrupt" role="alert">
+                <span class="status-icon" aria-hidden="true">&#10007;</span> Integrity check failed
+              </p>
+              <button type="button" (click)="skip()">Skip</button>
             }
           }
         </li>

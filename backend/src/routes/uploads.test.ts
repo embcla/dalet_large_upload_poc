@@ -31,6 +31,7 @@ describe('uploads routes', () => {
 
   function buildApp() {
     const app = express();
+    app.use(express.json());
     const datastore = { remove } as unknown as S3Store;
     app.use(createUploadsRouter(datastore));
     return app;
@@ -51,6 +52,31 @@ describe('uploads routes', () => {
 
     it('is a no-op (still 204) for an unknown upload', async () => {
       await request(buildApp()).post('/uploads/does-not-exist/heartbeat').expect(204);
+    });
+  });
+
+  describe('POST /uploads/:id/client-hash (M8 §12.9-12.11)', () => {
+    it('sets hash_verified=1 when the client hash matches the server hash', async () => {
+      dbModule.insertUpload({ id: 'hash-match', filename: 'a.mp4', size: 1, mimeType: 'video/mp4', storageKey: 'hash-match' });
+      dbModule.setServerFileHash('hash-match', 'abc123');
+
+      await request(buildApp()).post('/uploads/hash-match/client-hash').send({ hash: 'abc123' }).expect(204);
+
+      const row = dbModule.getUpload('hash-match');
+      expect(row?.hash_verified).toBe(1);
+      expect(row?.status).toBe('uploading');
+    });
+
+    it('sets hash_verified=0 and status=error when the hashes mismatch', async () => {
+      dbModule.insertUpload({ id: 'hash-mismatch', filename: 'a.mp4', size: 1, mimeType: 'video/mp4', storageKey: 'hash-mismatch' });
+      dbModule.markUploadStatus('hash-mismatch', 'success');
+      dbModule.setServerFileHash('hash-mismatch', 'server-hash');
+
+      await request(buildApp()).post('/uploads/hash-mismatch/client-hash').send({ hash: 'client-hash' }).expect(204);
+
+      const row = dbModule.getUpload('hash-mismatch');
+      expect(row?.hash_verified).toBe(0);
+      expect(row?.status).toBe('error');
     });
   });
 

@@ -58,6 +58,13 @@ export interface UploadResult {
   errorBody?: string;
 }
 
+/** `batch_key`/`last_modified`/`batch_position` metadata (M8 §12.12). */
+export interface BatchMeta {
+  batchKey: string;
+  lastModified: number;
+  batchPosition: number;
+}
+
 /**
  * Uploads `filePath` via tus, returning the tus upload id (parsed from the
  * final Location URL). Rejects with `{errorStatus, errorBody}` info attached
@@ -155,6 +162,54 @@ export function tusUploadWithHeartbeat(
 }
 
 /**
+ * Like `tusUpload`, but also sends `batchKey`/`lastModified`/`batchPosition`
+ * metadata (M8 §12.12), persisted by `onUploadCreate` for batch-manifest
+ * reconstruction.
+ */
+export function tusUploadWithBatchMeta(
+  filePath: string,
+  filename: string,
+  mimeType: string,
+  batchMeta: BatchMeta,
+  endpoint: string = TUS_ENDPOINT,
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const size = fs.statSync(filePath).size;
+    const stream = fs.createReadStream(filePath);
+
+    const upload = new tus.Upload(stream, {
+      endpoint,
+      uploadSize: size,
+      retryDelays: null,
+      metadata: {
+        filename,
+        filetype: mimeType,
+        batchKey: batchMeta.batchKey,
+        lastModified: String(batchMeta.lastModified),
+        batchPosition: String(batchMeta.batchPosition),
+      },
+      onError: (error) => {
+        const detailed = error as tus.DetailedError;
+        const status = detailed.originalResponse?.getStatus();
+        const body = detailed.originalResponse?.getBody();
+        if (status !== undefined) {
+          resolve({ uploadId: '', errorStatus: status, errorBody: body });
+        } else {
+          reject(error);
+        }
+      },
+      onSuccess: () => {
+        const url = upload.url ?? '';
+        const uploadId = url.split('/').pop() ?? '';
+        resolve({ uploadId });
+      },
+    });
+
+    upload.start();
+  });
+}
+
+/**
  * Sends a raw tus creation request (POST) without uploading any bytes.
  * Used to test server-side rejection (oversized / bad extension) without
  * generating a file.
@@ -182,13 +237,24 @@ export interface UploadRow {
   status: string;
   last_seen: string;
   bytes_received: number;
+  batch_key: string | null;
+  last_modified: number | null;
+  batch_position: number | null;
+  client_file_hash: string | null;
+  server_file_hash: string | null;
+  hash_verified: number | null;
 }
 
 export function getUploadRow(uploadId: string): UploadRow | undefined {
   const db = new Database(DB_PATH, { readonly: true });
   try {
     return db
-      .prepare('SELECT id, filename, size, status, last_seen, bytes_received FROM uploads WHERE id = ?')
+      .prepare(
+        `SELECT id, filename, size, status, last_seen, bytes_received,
+                batch_key, last_modified, batch_position,
+                client_file_hash, server_file_hash, hash_verified
+         FROM uploads WHERE id = ?`,
+      )
       .get(uploadId) as UploadRow | undefined;
   } finally {
     db.close();
@@ -258,6 +324,35 @@ export async function runCleanup(): Promise<{ cleaned: number }> {
   return (await res.json()) as { cleaned: number };
 }
 
+/** Entry shape returned by `GET /batches/:batchKey` (M8 §12.3-12.8). */
+export interface ManifestEntry {
+  id: string;
+  filename: string;
+  size: number;
+  lastModified: number | null;
+  batchPosition: number | null;
+  status: string;
+  bytesReceived: number;
+  storageKey: string;
+}
+
+export async function getBatchManifest(batchKey: string): Promise<ManifestEntry[]> {
+  const res = await fetch(`${BACKEND_URL}/batches/${batchKey}`);
+  return (await res.json()) as ManifestEntry[];
+}
+
+export async function pong(batchKey: string): Promise<Response> {
+  return fetch(`${BACKEND_URL}/batches/${batchKey}/pong`, { method: 'POST' });
+}
+
+export async function postClientHash(uploadId: string, hash: string): Promise<Response> {
+  return fetch(`${TUS_ENDPOINT}/${uploadId}/client-hash`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hash }),
+  });
+}
+
 /** Returns the S3 multipart UploadIds currently open for `key`, if any. */
 export async function listMultipartUploadIds(key: string): Promise<string[]> {
   const res = await s3.send(new ListMultipartUploadsCommand({ Bucket: BUCKET }));
@@ -279,6 +374,7 @@ export function startUploadAndAbort(
   filename: string,
   mimeType: string,
   abortAtBytes: number,
+  batchMeta?: BatchMeta,
 ): Promise<AbortedUpload> {
   return new Promise((resolve, reject) => {
     const size = fs.statSync(filePath).size;
@@ -296,7 +392,15 @@ export function startUploadAndAbort(
       // flush the whole file to the socket (and the server can finish
       // processing it) before onProgress/abort ever runs.
       chunkSize: abortAtBytes,
-      metadata: { filename, filetype: mimeType },
+      metadata: batchMeta
+        ? {
+            filename,
+            filetype: mimeType,
+            batchKey: batchMeta.batchKey,
+            lastModified: String(batchMeta.lastModified),
+            batchPosition: String(batchMeta.batchPosition),
+          }
+        : { filename, filetype: mimeType },
       onProgress: (bytesUploaded) => {
         if (settled || bytesUploaded < abortAtBytes) {
           return;
@@ -364,11 +468,15 @@ export interface ProgressEvent {
   bytesReceived: number;
   bytesTotal: number;
   message?: string;
+  /** Result of the M8 §12.9-12.11 client/server hash reconciliation. */
+  hashVerified?: boolean;
 }
 
 export interface ProgressStream {
   /** Events received so far, in order (mutated in place as more arrive). */
   events: ProgressEvent[];
+  /** Number of named `ping` events received so far (M8 §12.1/12.2). */
+  pings: number;
   /** Closes the underlying SSE connection. */
   close: () => void;
 }
@@ -376,16 +484,19 @@ export interface ProgressStream {
 /**
  * Connects to `GET /progress/stream` (M5 §9) and appends every `data:`
  * payload it receives to `events`. Resolves once the connection is open
- * (after the initial snapshot has started streaming).
+ * (after the initial snapshot has started streaming). Also counts named
+ * `event: ping` lines into `pings` (M8 §12.1/12.2).
  */
 export async function openProgressStream(): Promise<ProgressStream> {
   const events: ProgressEvent[] = [];
   const controller = new AbortController();
+  const stream: ProgressStream = { events, pings: 0, close: () => controller.abort() };
 
   const res = await fetch(`${BACKEND_URL}/progress/stream`, { signal: controller.signal });
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let currentEvent: string | undefined;
 
   void (async () => {
     try {
@@ -398,8 +509,16 @@ export async function openProgressStream(): Promise<ProgressStream> {
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            events.push(JSON.parse(line.slice('data: '.length)) as ProgressEvent);
+          if (line === '') {
+            currentEvent = undefined;
+          } else if (line.startsWith('event: ')) {
+            currentEvent = line.slice('event: '.length);
+          } else if (line.startsWith('data: ')) {
+            if (currentEvent === 'ping') {
+              stream.pings += 1;
+            } else {
+              events.push(JSON.parse(line.slice('data: '.length)) as ProgressEvent);
+            }
           }
         }
       }
@@ -408,7 +527,7 @@ export async function openProgressStream(): Promise<ProgressStream> {
     }
   })();
 
-  return { events, close: () => controller.abort() };
+  return stream;
 }
 
 /** Polls `predicate` until it returns true or `timeoutMs` elapses. */

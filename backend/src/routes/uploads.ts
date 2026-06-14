@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import type { S3Store } from '@tus/s3-store';
-import { getUpload, markUploadStatus, touchLastSeen } from '../db';
+import { getUpload, markUploadStatus, setClientFileHash, touchLastSeen } from '../db';
 import { abortUpload } from '../cleanup';
-import { broadcast } from '../progress';
+import { broadcast, maybeBroadcastIntegrity } from '../progress';
 
 /**
  * §2.11 heartbeat/abandon endpoints. Both are no-ops (still 204) for unknown
@@ -14,6 +14,15 @@ export function createUploadsRouter(datastore: S3Store): Router {
 
   router.post('/uploads/:id/heartbeat', (req, res) => {
     touchLastSeen(req.params.id);
+    res.status(204).end();
+  });
+
+  // M8 §12.9-12.11: records the client's SHA-256 of the completed file and
+  // broadcasts the reconciliation result once the server hash has also
+  // been recorded (set asynchronously by tus.ts's onUploadFinish).
+  router.post('/uploads/:id/client-hash', (req, res) => {
+    const row = setClientFileHash(req.params.id, req.body?.hash);
+    maybeBroadcastIntegrity(row);
     res.status(204).end();
   });
 

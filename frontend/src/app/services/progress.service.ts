@@ -13,6 +13,8 @@ export interface ProgressEvent {
   bytesReceived: number;
   bytesTotal: number;
   message?: string;
+  /** Result of the M8 §12.9-12.11 client/server hash reconciliation. */
+  hashVerified?: boolean;
 }
 
 /**
@@ -23,6 +25,9 @@ export interface ProgressEvent {
 @Injectable({ providedIn: 'root' })
 export class ProgressService {
   readonly events = signal<ReadonlyMap<string, ProgressEvent>>(new Map());
+
+  /** Bumped on every named `ping` SSE event (M8 §12.1/12.2). */
+  readonly pings = signal(0);
 
   private eventSource?: EventSource;
 
@@ -39,6 +44,9 @@ export class ProgressService {
       next.set(data.uploadId, data);
       this.events.set(next);
     };
+    this.eventSource.addEventListener('ping', () => {
+      this.pings.set(this.pings() + 1);
+    });
   }
 
   disconnect(): void {

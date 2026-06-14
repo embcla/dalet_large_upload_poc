@@ -21,6 +21,7 @@ class FakeConfigService {
 
 class FakeProgressService {
   readonly events = signal<ReadonlyMap<string, ProgressEvent>>(new Map());
+  readonly pings = signal(0);
   connect = vi.fn();
 
   emit(event: ProgressEvent): void {
@@ -91,8 +92,8 @@ describe('UploadQueue', () => {
     vi.useRealTimers();
   });
 
-  function selectFiles(files: File[]): void {
-    component.onFilesSelected(filesEvent(files));
+  async function selectFiles(files: File[]): Promise<void> {
+    await component.onFilesSelected(filesEvent(files));
     fixture.detectChanges();
   }
 
@@ -106,30 +107,30 @@ describe('UploadQueue', () => {
     expect(progressService.connect).toHaveBeenCalled();
   });
 
-  it('renders one .queue-item per selected file', () => {
-    selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200), makeFile('c.mp4', 300)]);
+  it('renders one .queue-item per selected file', async () => {
+    await selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200), makeFile('c.mp4', 300)]);
 
     const items = fixture.nativeElement.querySelectorAll('.queue-item');
     expect(items).toHaveLength(3);
   });
 
-  it('shows the first file as uploading and the rest as waiting', () => {
-    selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200)]);
+  it('shows the first file as uploading and the rest as waiting', async () => {
+    await selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200)]);
 
     const items = fixture.nativeElement.querySelectorAll('.queue-item');
     expect(items[0].querySelector('.message--info')?.textContent).toContain('Uploading');
     expect(items[1].querySelector('.message--queued')?.textContent).toContain('Waiting');
   });
 
-  it('shows a validation error and adds nothing for a disallowed file', () => {
-    selectFiles([makeFile('notes.txt', 10, 'text/plain')]);
+  it('shows a validation error and adds nothing for a disallowed file', async () => {
+    await selectFiles([makeFile('notes.txt', 10, 'text/plain')]);
 
     expect(fixture.nativeElement.querySelector('.message--error')?.textContent).toContain('.mp4, .mkv');
     expect(fixture.nativeElement.querySelectorAll('.queue-item')).toHaveLength(0);
   });
 
-  it('binds the aggregate progress bar to the service aggregate signals', () => {
-    selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200)]);
+  it('binds the aggregate progress bar to the service aggregate signals', async () => {
+    await selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200)]);
 
     makeUploadUrlAvailable(uploads[0], 'u1');
     progressService.emit({ uploadId: 'u1', status: 'uploading', bytesReceived: 50, bytesTotal: 100 });
@@ -143,8 +144,8 @@ describe('UploadQueue', () => {
     );
   });
 
-  it('shows Pause for an uploading item and Resume after pausing', () => {
-    selectFiles([makeFile('a.mp4', 100)]);
+  it('shows Pause for an uploading item and Resume after pausing', async () => {
+    await selectFiles([makeFile('a.mp4', 100)]);
 
     let item = fixture.nativeElement.querySelector('.queue-item');
     expect(item.querySelector('button')?.textContent).toContain('Pause');
@@ -156,8 +157,8 @@ describe('UploadQueue', () => {
     expect(item.querySelector('button')?.textContent).toContain('Resume');
   });
 
-  it('shows Retry and Skip buttons when the active item errors', () => {
-    selectFiles([makeFile('a.mp4', 100)]);
+  it('shows Retry and Skip buttons when the active item errors', async () => {
+    await selectFiles([makeFile('a.mp4', 100)]);
 
     uploads[0].options.onError?.(new Error('boom'));
     fixture.detectChanges();
@@ -168,8 +169,8 @@ describe('UploadQueue', () => {
     expect(item.querySelector('.message--error')?.textContent).toContain('boom');
   });
 
-  it('shows the success message once the active item completes', () => {
-    selectFiles([makeFile('a.mp4', 100)]);
+  it('shows the success message once the active item completes', async () => {
+    await selectFiles([makeFile('a.mp4', 100)]);
 
     makeUploadUrlAvailable(uploads[0], 'u1');
     progressService.emit({ uploadId: 'u1', status: 'success', bytesReceived: 100, bytesTotal: 100 });

@@ -117,6 +117,21 @@ describe('progress (M5 SSE channel, §9)', () => {
     req.emit('close');
   });
 
+  it('sends a named ping event alongside the keepalive comment (M8 §12.1)', () => {
+    const req = fakeReq();
+    const res = fakeRes();
+    handleProgressStream(req, res);
+    res.write.mockClear();
+
+    jest.advanceTimersByTime(20_000);
+
+    const pingCall = res.write.mock.calls.find(([chunk]: [string]) => chunk.startsWith('event: ping\n'));
+    expect(pingCall).toBeDefined();
+    const data = JSON.parse((pingCall![0] as string).split('data: ')[1].trim());
+    expect(typeof data.timestamp).toBe('number');
+    req.emit('close');
+  });
+
   it('stops broadcasting and clears the keepalive timer once the client disconnects', () => {
     const req = fakeReq();
     const res = fakeRes();

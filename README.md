@@ -16,10 +16,11 @@ protocol. This repo currently implements:
   and marks the session `abandoned` if no heartbeat is seen within
   `heartbeatTimeoutSeconds` (default 90s).
 
-  Known limitation (by design, §2.12): pause/resume only works within the
-  same browser session/tab — a full page reload loses the in-memory upload
-  handle and cannot resume, even though the server-side upload remains valid
-  until the cleanup job (or abandon beacon) removes it.
+  Known limitation at the time (addressed in M8, §12.3-12.8): pause/resume
+  only worked within the same browser session/tab — a full page reload lost
+  the in-memory upload handle and could not resume, even though the
+  server-side upload remained valid until the cleanup job (or abandon beacon)
+  removed it.
 - **M3** — Toxiproxy sits between the frontend and backend (`browser ↔
   backend`) for network-degradation testing during local dev (see "Upload
   throttling" below). The scenario test suite (§7, `m3-network.test.ts`)
@@ -56,10 +57,10 @@ protocol. This repo currently implements:
   queued file). The §2.11 heartbeat and abandon-beacon mechanisms are now
   per-file, generalizing the single-upload versions from M2.
 
-  Known limitation (temporary — addressed in M8, §12): queue state is
-  in-memory only — a full page reload mid-batch loses the queue and requires
-  restarting the batch selection from scratch. M8 will remove this limitation
-  via the server-held batch manifest and cross-reload resume (§2.12).
+  Known limitation at the time (addressed in M8, §12): queue state was
+  in-memory only — a full page reload mid-batch lost the queue and required
+  restarting the batch selection from scratch. M8 removes this limitation via
+  the server-held batch manifest and cross-reload resume (§12.3-12.8).
 - **M7** — uploaded files visualization & playback (§11): a two-column
   layout adds a right-hand "Uploaded files" panel (`app-files-list`) next to
   the M6 upload queue. On `onUploadFinish`, the backend runs `ffprobe`
@@ -76,7 +77,37 @@ protocol. This repo currently implements:
   `<video>` player for `playable` files or a "Preview not available" message
   otherwise.
 
-M8 (cross-reload batch resume, §12) is not yet implemented.
+- **M8** — session continuity (§12), the final core milestone:
+  - **Ping/pong (§12.1/12.2)**: the M5 SSE channel now also pushes a named
+    `event: ping` every `PROGRESS_KEEPALIVE_MS` (default 20s, alongside the
+    existing `: keepalive` comment). On each ping, the frontend `POST`s
+    `/batches/:batchKey/pong` for the active queue item, which bumps
+    `last_seen` for its in-progress row — replacing the M2 per-upload
+    client heartbeat on the frontend (the backend's heartbeat/abandon
+    endpoints remain functional for the M2 test suite).
+  - **Batch manifest & cross-reload resume (§12.3-12.8)**: every file
+    selection is sorted by `name|size|lastModified` and hashed (SHA-256) into
+    a deterministic `batch_key`, sent as upload metadata
+    (`batchKey`/`lastModified`/`batchPosition`, §12.12) and persisted on the
+    `uploads` row by `onUploadCreate`. Re-selecting the same file(s) — even
+    after a full page reload — fetches `GET /batches/:batchKey`: completed
+    rows (`success`) are shown done immediately with no new `tus.Upload`;
+    in-progress rows (`uploading`/`paused`) resume via `tus-js-client`'s
+    `uploadUrl` option (HEAD + resume-PATCH from the reported offset, no
+    creation POST); everything else starts fresh. This removes M6's
+    "queue state is in-memory only" limitation.
+  - **Post-completion integrity check (§12.9-12.11)**: after a file finishes
+    uploading, the client computes its SHA-256 (via `SubtleCrypto`) and posts
+    it to `POST /uploads/:id/client-hash`; independently, the server streams
+    the object from MinIO and computes its own SHA-256
+    (`computeServerHash`). Once both hashes are known, the server sets
+    `hash_verified` (and, on a server hash, `status: 'error'` if mismatched)
+    and broadcasts the result over SSE as `hashVerified` on the upload's
+    `ProgressEvent`. The frontend shows a `✓ verified` badge next to
+    `success` items when `hashVerified === true`, or a new terminal
+    `corrupt` status ("Integrity check failed", with a Skip button) when
+    `hashVerified === false`. Both hash computations are fire-and-forget and
+    don't block queue progression.
 
 ## Repo layout
 
@@ -207,8 +238,17 @@ docker run --rm -v "$(pwd)/..":/workspace -w /workspace/frontend \
 
 (or `npm install && npx ng test` directly if you have Node 22.)
 
-`upload-queue.service.spec.ts` covers the M6 batch-queue state machine:
-sequential processing of all files to `success` (aggregate progress reaches
+`upload-queue.service.spec.ts` covers the M6 batch-queue state machine and
+the M8 (§12) additions: a `success` row in the batch manifest reconstructs an
+item as already-done with no new `tus.Upload`; an `uploading`/`paused` row
+resumes via `uploadUrl`, seeding `bytesUploaded` from the manifest's
+`bytesReceived`; fresh uploads carry `batchKey`/`lastModified`/
+`batchPosition` metadata; an SSE `ping` triggers a `pong` POST for the active
+item's batch; `onSuccess` posts a client SHA-256 hash without delaying
+`processNext()`; and `displayStatus`/`isVerified` reflect `hashVerified`
+(`corrupt` / `✓ verified`).
+
+Sequential processing of all files to `success` (aggregate progress reaches
 100%), a mid-queue `error` pausing the queue (remaining files stay `queued`,
 aggregate stalls), Retry resuming the same `tus.Upload` instance, and Skip
 marking a file `skipped` and advancing the queue (excluded from the aggregate
@@ -274,6 +314,30 @@ a `Range: bytes=0-1023` request returns `206` with
 request returns `200` with `Accept-Ranges: bytes` and the full
 `Content-Length`.
 
+`m8-batch-manifest.test.ts` (§12.3-12.8, §12.12) uploads a 2-file batch
+sharing a `batch_key`: one file to completion (`batch_position: 0`), the
+other aborted partway (`batch_position: 1`). Asserts both DB rows have
+`batch_key`/`last_modified`/`batch_position` populated, and that
+`GET /batches/:batchKey` returns both entries ordered by `batchPosition` —
+the first `success`, the second `uploading` with `bytesReceived` matching the
+abort offset. Resuming the second file to completion then shows it `success`
+with `bytesReceived === size` in the manifest. A third position (never
+created) is absent from the manifest, and an unknown `batchKey` returns `[]`.
+
+`m8-session-continuity.test.ts` (§12.1/12.2) covers the pong endpoint:
+`POST /batches/:batchKey/pong` bumps `last_seen` for the batch's active
+`uploading`/`paused` row (and is a no-op for an unknown batch key), and a row
+with a stale `last_seen` and no pong is still cleaned up to `abandoned` by the
+existing `POST /internal/cleanup/run` job (same mechanism as M2, new trigger
+path).
+
+`m8-integrity.test.ts` (§12.9-12.11) uploads a fixture, waits for its SSE
+`success` event, then `POST /uploads/:id/client-hash`es the file's real
+SHA-256 — asserting an SSE event with `hashVerified: true` arrives and the DB
+row has matching `client_file_hash`/`server_file_hash`. A second upload posts
+a deliberately wrong hash and asserts `hashVerified: false`, `status: 'error'`
+over SSE and in the DB.
+
 ```sh
 cd tests
 npm install
@@ -322,3 +386,12 @@ badge; clicking the row shows a `<video>` element whose `src` points at
 validate Range support end-to-end. It then uploads `incompatible.mkv` and
 confirms its row shows a `Not playable` badge and, once selected, a "preview
 not available" message with no `<video>` element rendered.
+
+`m8-resume.spec.ts` (§12.3-12.11) selects a large file, waits for visible
+upload progress, clicks Pause, then reloads the page and re-selects the same
+file. The frontend computes the same `batch_key`, fetches the manifest, and
+resumes the item via `uploadUrl` — the progress bar starts at/above the
+byte count captured before reload, then reaches `success` ("Upload
+complete"). A `✓ verified` badge then appears once the client/server
+integrity hashes reconcile, and the final object checksum matches the source
+file.

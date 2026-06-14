@@ -100,14 +100,22 @@ export function insertUpload(row: {
   size: number;
   mimeType: string | null;
   storageKey: string;
+  batchKey?: string | null;
+  lastModified?: number | null;
+  batchPosition?: number | null;
 }): void {
   const database = getDb();
   database
     .prepare(
-      `INSERT INTO uploads (id, filename, size, mime_type, status, storage_key, last_seen, created_at, updated_at)
-       VALUES (@id, @filename, @size, @mimeType, 'uploading', @storageKey, datetime('now'), datetime('now'), datetime('now'))`,
+      `INSERT INTO uploads (id, filename, size, mime_type, status, storage_key, last_seen, created_at, updated_at, batch_key, last_modified, batch_position)
+       VALUES (@id, @filename, @size, @mimeType, 'uploading', @storageKey, datetime('now'), datetime('now'), datetime('now'), @batchKey, @lastModified, @batchPosition)`,
     )
-    .run(row);
+    .run({
+      ...row,
+      batchKey: row.batchKey ?? null,
+      lastModified: row.lastModified ?? null,
+      batchPosition: row.batchPosition ?? null,
+    });
 }
 
 export function markUploadStatus(id: string, status: UploadStatus): void {
@@ -221,4 +229,88 @@ export function getCompletedUploads(): UploadRow[] {
   return database
     .prepare(`SELECT * FROM uploads WHERE status = 'success' ORDER BY created_at DESC`)
     .all() as UploadRow[];
+}
+
+/**
+ * Returns the rows belonging to a batch (M8 §12), one per `batch_position`.
+ * If a position has multiple rows (e.g. an abandoned attempt followed by a
+ * fresh retry on a later reload), the most-recently-inserted row wins.
+ * Ordered ascending by `batch_position`.
+ */
+export function getUploadsByBatchKey(batchKey: string): UploadRow[] {
+  const database = getDb();
+  const rows = database
+    .prepare(`SELECT * FROM uploads WHERE batch_key = @batchKey ORDER BY rowid ASC`)
+    .all({ batchKey }) as UploadRow[];
+
+  const byPosition = new Map<number, UploadRow>();
+  for (const row of rows) {
+    if (row.batch_position !== null) {
+      byPosition.set(row.batch_position, row);
+    }
+  }
+
+  return Array.from(byPosition.values()).sort(
+    (a, b) => (a.batch_position ?? 0) - (b.batch_position ?? 0),
+  );
+}
+
+/**
+ * Updates last_seen for the active (uploading/paused) row of a batch (M8
+ * §12.2 pong), mirroring `touchLastSeen` but addressed by `batch_key`.
+ */
+export function touchLastSeenForBatch(batchKey: string): void {
+  const database = getDb();
+  database
+    .prepare(
+      `UPDATE uploads SET last_seen = datetime('now') WHERE batch_key = @batchKey AND status IN ('uploading', 'paused')`,
+    )
+    .run({ batchKey });
+}
+
+/**
+ * If both client and server hashes are now present, sets `hash_verified`
+ * (1 on match, 0 and `status = 'error'` on mismatch). Returns the
+ * up-to-date row, or `undefined` if the upload doesn't exist.
+ */
+function reconcileHash(id: string): UploadRow | undefined {
+  const database = getDb();
+  const row = getUpload(id);
+  if (!row || row.client_file_hash === null || row.server_file_hash === null) {
+    return row;
+  }
+
+  if (row.client_file_hash === row.server_file_hash) {
+    database
+      .prepare(`UPDATE uploads SET hash_verified = 1, updated_at = datetime('now') WHERE id = @id`)
+      .run({ id });
+  } else {
+    database
+      .prepare(
+        `UPDATE uploads SET hash_verified = 0, status = 'error', updated_at = datetime('now') WHERE id = @id`,
+      )
+      .run({ id });
+  }
+
+  return getUpload(id);
+}
+
+/**
+ * Records the client's SHA-256 of the completed file (M8 §12.9-12.11) and
+ * reconciles against the server hash if already present.
+ */
+export function setClientFileHash(id: string, hash: string): UploadRow | undefined {
+  const database = getDb();
+  database.prepare(`UPDATE uploads SET client_file_hash = @hash WHERE id = @id`).run({ id, hash });
+  return reconcileHash(id);
+}
+
+/**
+ * Records the server's SHA-256 of the completed object (M8 §12.9-12.11) and
+ * reconciles against the client hash if already present.
+ */
+export function setServerFileHash(id: string, hash: string): UploadRow | undefined {
+  const database = getDb();
+  database.prepare(`UPDATE uploads SET server_file_hash = @hash WHERE id = @id`).run({ id, hash });
+  return reconcileHash(id);
 }

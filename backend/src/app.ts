@@ -6,6 +6,7 @@ import { configRouter } from './routes/config';
 import { createUploadsRouter } from './routes/uploads';
 import { createInternalRouter } from './routes/internal';
 import { createFilesRouter } from './routes/files';
+import { createBatchesRouter } from './routes/batches';
 import { createProgressRouter } from './progress';
 import { createDatastore, createTusHandler } from './tus';
 
@@ -22,6 +23,11 @@ export function createApp(): Express {
   app.use(healthRouter);
   app.use(configRouter);
 
+  // M8 §12: JSON bodies for /uploads/:id/client-hash etc. Only intercepts
+  // application/json requests — tus PATCH/POST use
+  // application/offset+octet-stream and pass through untouched.
+  app.use(express.json());
+
   const datastore = createDatastore();
 
   // Mounted before the tus catch-all so /uploads/:id/heartbeat and
@@ -29,6 +35,7 @@ export function createApp(): Express {
   app.use(createUploadsRouter(datastore));
   app.use(createInternalRouter(datastore));
   app.use(createFilesRouter());
+  app.use(createBatchesRouter());
   app.use(createProgressRouter());
 
   const tusHandler = createTusHandler(datastore);

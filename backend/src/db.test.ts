@@ -358,6 +358,194 @@ describe('db', () => {
     });
   });
 
+  describe('insertUpload with batch fields (M8 §12.12)', () => {
+    it('round-trips batchKey/lastModified/batchPosition', () => {
+      dbModule.insertUpload({
+        id: 'batch-1',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'batch-1',
+        batchKey: 'abc123',
+        lastModified: 1700000000000,
+        batchPosition: 0,
+      });
+
+      const row = dbModule.getUpload('batch-1');
+      expect(row?.batch_key).toBe('abc123');
+      expect(row?.last_modified).toBe(1700000000000);
+      expect(row?.batch_position).toBe(0);
+    });
+
+    it('defaults batch fields to null when omitted', () => {
+      dbModule.insertUpload({
+        id: 'batch-2',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'batch-2',
+      });
+
+      const row = dbModule.getUpload('batch-2');
+      expect(row?.batch_key).toBeNull();
+      expect(row?.last_modified).toBeNull();
+      expect(row?.batch_position).toBeNull();
+    });
+  });
+
+  describe('getUploadsByBatchKey', () => {
+    it('returns rows ordered by batch_position', () => {
+      dbModule.insertUpload({
+        id: 'pos-1',
+        filename: 'b.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'pos-1',
+        batchKey: 'batch-x',
+        batchPosition: 1,
+      });
+      dbModule.insertUpload({
+        id: 'pos-0',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'pos-0',
+        batchKey: 'batch-x',
+        batchPosition: 0,
+      });
+
+      const rows = dbModule.getUploadsByBatchKey('batch-x');
+
+      expect(rows.map((row) => row.id)).toEqual(['pos-0', 'pos-1']);
+    });
+
+    it('dedups by batch_position, keeping the most-recently-inserted row', () => {
+      dbModule.insertUpload({
+        id: 'stale-attempt',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'stale-attempt',
+        batchKey: 'batch-y',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('stale-attempt', 'abandoned');
+
+      dbModule.insertUpload({
+        id: 'fresh-attempt',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'fresh-attempt',
+        batchKey: 'batch-y',
+        batchPosition: 0,
+      });
+
+      const rows = dbModule.getUploadsByBatchKey('batch-y');
+
+      expect(rows.map((row) => row.id)).toEqual(['fresh-attempt']);
+    });
+
+    it('returns an empty array for an unknown batch key', () => {
+      expect(dbModule.getUploadsByBatchKey('does-not-exist')).toEqual([]);
+    });
+  });
+
+  describe('touchLastSeenForBatch', () => {
+    it('bumps last_seen for the active row of a batch', () => {
+      dbModule.insertUpload({
+        id: 'active-row',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'active-row',
+        batchKey: 'batch-z',
+        batchPosition: 0,
+      });
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = '2000-01-01 00:00:00' WHERE id = 'active-row'`)
+        .run();
+
+      dbModule.touchLastSeenForBatch('batch-z');
+
+      expect(dbModule.getUpload('active-row')?.last_seen).not.toBe('2000-01-01 00:00:00');
+    });
+
+    it('is a no-op for a batch with no active (uploading/paused) row', () => {
+      dbModule.insertUpload({
+        id: 'done-row',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'done-row',
+        batchKey: 'batch-w',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('done-row', 'success');
+      dbModule
+        .getDb()
+        .prepare(`UPDATE uploads SET last_seen = '2000-01-01 00:00:00' WHERE id = 'done-row'`)
+        .run();
+
+      dbModule.touchLastSeenForBatch('batch-w');
+
+      expect(dbModule.getUpload('done-row')?.last_seen).toBe('2000-01-01 00:00:00');
+    });
+  });
+
+  describe('setClientFileHash / setServerFileHash (M8 §12.9-12.11)', () => {
+    it('leaves hash_verified null until both hashes are present (server then client)', () => {
+      dbModule.insertUpload({
+        id: 'hash-1',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'hash-1',
+      });
+
+      const afterServer = dbModule.setServerFileHash('hash-1', 'deadbeef');
+      expect(afterServer?.hash_verified).toBeNull();
+
+      const afterClient = dbModule.setClientFileHash('hash-1', 'deadbeef');
+      expect(afterClient?.hash_verified).toBe(1);
+      expect(afterClient?.status).toBe('uploading');
+    });
+
+    it('sets hash_verified=1 on match (client then server)', () => {
+      dbModule.insertUpload({
+        id: 'hash-2',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'hash-2',
+      });
+
+      const afterClient = dbModule.setClientFileHash('hash-2', 'abc123');
+      expect(afterClient?.hash_verified).toBeNull();
+
+      const afterServer = dbModule.setServerFileHash('hash-2', 'abc123');
+      expect(afterServer?.hash_verified).toBe(1);
+    });
+
+    it('sets hash_verified=0 and status=error on mismatch', () => {
+      dbModule.insertUpload({
+        id: 'hash-3',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'hash-3',
+      });
+      dbModule.markUploadStatus('hash-3', 'success');
+
+      dbModule.setClientFileHash('hash-3', 'client-hash');
+      const afterServer = dbModule.setServerFileHash('hash-3', 'server-hash');
+
+      expect(afterServer?.hash_verified).toBe(0);
+      expect(afterServer?.status).toBe('error');
+    });
+  });
+
   describe('getStaleUploads', () => {
     it('returns only in-progress uploads whose last_seen exceeds the timeout', () => {
       dbModule.insertUpload({

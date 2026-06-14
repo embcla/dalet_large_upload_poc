@@ -9,14 +9,27 @@ class FakeEventSource {
   url: string;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
   close = vi.fn();
+  private listeners = new Map<string, Array<() => void>>();
 
   constructor(url: string) {
     this.url = url;
     FakeEventSource.instances.push(this);
   }
 
+  addEventListener(type: string, listener: () => void): void {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
   emit(data: unknown): void {
     this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent<string>);
+  }
+
+  emitNamed(type: string): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener();
+    }
   }
 }
 
@@ -81,5 +94,24 @@ describe('ProgressService', () => {
     service.disconnect();
 
     expect(source.close).toHaveBeenCalled();
+  });
+
+  it('stores hashVerified on a progress event unchanged (M8 §12.9-12.11)', () => {
+    service.connect();
+    const source = FakeEventSource.instances[0];
+
+    source.emit({ uploadId: 'u1', status: 'success', bytesReceived: 1000, bytesTotal: 1000, hashVerified: true });
+
+    expect(service.events().get('u1')?.hashVerified).toBe(true);
+  });
+
+  it('increments pings() on a named ping event, without affecting events() (M8 §12.1/12.2)', () => {
+    service.connect();
+    const source = FakeEventSource.instances[0];
+
+    source.emitNamed('ping');
+
+    expect(service.pings()).toBe(1);
+    expect(service.events().size).toBe(0);
   });
 });

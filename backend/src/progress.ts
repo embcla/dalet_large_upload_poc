@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { config } from './config';
-import { getNonTerminalUploads, type UploadStatus } from './db';
+import { getNonTerminalUploads, type UploadRow, type UploadStatus } from './db';
 
 /**
  * A server->client push over the M5 (§9) SSE channel. `bytesReceived`/
@@ -14,6 +14,8 @@ export interface ProgressEvent {
   bytesReceived: number;
   bytesTotal: number;
   message?: string;
+  /** Result of the M8 §12.9-12.11 client/server hash reconciliation. */
+  hashVerified?: boolean;
 }
 
 const subscribers = new Set<Response>();
@@ -32,6 +34,25 @@ export function broadcast(event: ProgressEvent): void {
   for (const res of subscribers) {
     res.write(message);
   }
+}
+
+/**
+ * Broadcasts the result of an integrity-hash reconciliation (M8
+ * §12.9-12.11), if `row` now has a non-null `hash_verified` (i.e. both the
+ * client and server hashes have been recorded). No-op otherwise (only one
+ * side has reported so far, or the upload doesn't exist).
+ */
+export function maybeBroadcastIntegrity(row: UploadRow | undefined): void {
+  if (!row || row.hash_verified === null) {
+    return;
+  }
+  broadcast({
+    uploadId: row.id,
+    status: row.status,
+    bytesReceived: row.bytes_received,
+    bytesTotal: row.size,
+    hashVerified: row.hash_verified === 1,
+  });
 }
 
 /** Snapshot of all non-terminal uploads, sent on connect (M5 §9.6). */
@@ -66,6 +87,10 @@ export function handleProgressStream(req: Request, res: Response): void {
 
   const keepalive = setInterval(() => {
     res.write(': keepalive\n\n');
+    // M8 §12.1/12.2: a named `ping` event the frontend listens for via
+    // `addEventListener('ping', ...)`, separate from the default-`message`
+    // ProgressEvent channel.
+    res.write(`event: ping\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
   }, config.progressKeepaliveMs);
 
   req.on('close', () => {
