@@ -451,6 +451,98 @@ describe('db', () => {
     });
   });
 
+  describe('M9 cancellation (§13)', () => {
+    it('markUploadStatus round-trips the cancelled status', () => {
+      dbModule.insertUpload({
+        id: 'to-cancel',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'to-cancel',
+      });
+
+      dbModule.markUploadStatus('to-cancel', 'cancelled');
+
+      expect(dbModule.getUpload('to-cancel')?.status).toBe('cancelled');
+    });
+  });
+
+  describe('getCancellableUploadsByBatchKey', () => {
+    it('excludes success/cancelled rows but includes uploading/paused/error/abandoned', () => {
+      const statuses: Array<[string, import('./db').UploadStatus]> = [
+        ['row-uploading', 'uploading'],
+        ['row-paused', 'paused'],
+        ['row-error', 'error'],
+        ['row-abandoned', 'abandoned'],
+        ['row-success', 'success'],
+        ['row-cancelled', 'cancelled'],
+      ];
+
+      statuses.forEach(([id, status], index) => {
+        dbModule.insertUpload({
+          id,
+          filename: 'a.mp4',
+          size: 10,
+          mimeType: 'video/mp4',
+          storageKey: id,
+          batchKey: 'batch-cancel',
+          batchPosition: index,
+        });
+        dbModule.markUploadStatus(id, status);
+      });
+
+      const rows = dbModule.getCancellableUploadsByBatchKey('batch-cancel');
+
+      expect(rows.map((row) => row.id)).toEqual(['row-uploading', 'row-paused', 'row-error', 'row-abandoned']);
+    });
+
+    it('respects dedup-by-batch_position ordering', () => {
+      dbModule.insertUpload({
+        id: 'stale-attempt',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'stale-attempt',
+        batchKey: 'batch-cancel-dedup',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('stale-attempt', 'abandoned');
+
+      dbModule.insertUpload({
+        id: 'fresh-attempt',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'fresh-attempt',
+        batchKey: 'batch-cancel-dedup',
+        batchPosition: 0,
+      });
+
+      const rows = dbModule.getCancellableUploadsByBatchKey('batch-cancel-dedup');
+
+      expect(rows.map((row) => row.id)).toEqual(['fresh-attempt']);
+    });
+
+    it('returns an empty array when all rows are success/cancelled', () => {
+      dbModule.insertUpload({
+        id: 'done',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'done',
+        batchKey: 'batch-all-done',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('done', 'success');
+
+      expect(dbModule.getCancellableUploadsByBatchKey('batch-all-done')).toEqual([]);
+    });
+
+    it('returns an empty array for an unknown batch key', () => {
+      expect(dbModule.getCancellableUploadsByBatchKey('does-not-exist')).toEqual([]);
+    });
+  });
+
   describe('touchLastSeenForBatch', () => {
     it('bumps last_seen for the active row of a batch', () => {
       dbModule.insertUpload({

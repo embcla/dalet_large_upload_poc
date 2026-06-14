@@ -41,5 +41,24 @@ export function createUploadsRouter(datastore: S3Store): Router {
     res.status(204).end();
   });
 
+  // M9 §13: permanent, user-initiated cancellation. Mounted before the tus
+  // catch-all, so this intercepts the DELETE sent by tus.Upload#abort(true)
+  // as well as direct calls. Idempotent: missing/already-cancelled/success
+  // rows are a no-op 204.
+  router.delete('/uploads/:id', async (req, res) => {
+    const upload = getUpload(req.params.id);
+    if (upload && upload.status !== 'cancelled' && upload.status !== 'success') {
+      await abortUpload(datastore, req.params.id);
+      markUploadStatus(req.params.id, 'cancelled');
+      broadcast({
+        uploadId: req.params.id,
+        status: 'cancelled',
+        bytesReceived: upload.bytes_received,
+        bytesTotal: upload.size,
+      });
+    }
+    res.status(204).end();
+  });
+
   return router;
 }

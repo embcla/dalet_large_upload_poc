@@ -7,12 +7,27 @@ import { broadcast } from './progress';
 /**
  * Aborts the MinIO multipart upload for `id` and removes the in-progress
  * object/metadata. Tolerates an upload that's already gone.
+ *
+ * `@tus/s3-store#remove` is meant to throw `ERRORS.FILE_NOT_FOUND` in this
+ * case, but its check for the AWS error code is broken (it reads
+ * `error.code` while the SDK sets `error.Code`), so a raw AWS SDK
+ * `NoSuchKey`/`NoSuchUpload`/`NotFound` error (404) can also surface here -
+ * tolerate that shape too.
  */
 export async function abortUpload(datastore: S3Store, id: string): Promise<void> {
   try {
     await datastore.remove(id);
   } catch (error) {
-    if ((error as { status_code?: number } | undefined)?.status_code === ERRORS.FILE_NOT_FOUND.status_code) {
+    const statusCode =
+      (error as { status_code?: number; $metadata?: { httpStatusCode?: number } } | undefined)?.status_code ??
+      (error as { $metadata?: { httpStatusCode?: number } } | undefined)?.$metadata?.httpStatusCode;
+    const code = (error as { Code?: string; name?: string } | undefined)?.Code;
+    if (
+      statusCode === ERRORS.FILE_NOT_FOUND.status_code ||
+      code === 'NoSuchKey' ||
+      code === 'NoSuchUpload' ||
+      code === 'NotFound'
+    ) {
       return;
     }
     throw error;

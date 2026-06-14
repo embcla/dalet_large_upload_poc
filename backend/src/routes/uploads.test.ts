@@ -8,6 +8,7 @@ import type { S3Store } from '@tus/s3-store';
 describe('uploads routes', () => {
   let tmpDir: string;
   let dbModule: typeof import('../db');
+  let progressModule: typeof import('../progress');
   let createUploadsRouter: typeof import('./uploads').createUploadsRouter;
   let remove: jest.Mock;
 
@@ -18,6 +19,8 @@ describe('uploads routes', () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     dbModule = require('../db');
     dbModule.runMigrations();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    progressModule = require('../progress');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     ({ createUploadsRouter } = require('./uploads'));
 
@@ -104,6 +107,63 @@ describe('uploads routes', () => {
       await request(buildApp()).post('/uploads/does-not-exist/abandon').expect(204);
 
       expect(remove).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('DELETE /uploads/:id (M9 §13)', () => {
+    it('aborts the multipart upload, marks the row cancelled, and broadcasts cancelled', async () => {
+      const broadcastSpy = jest.spyOn(progressModule, 'broadcast');
+      dbModule.insertUpload({ id: 'c1', filename: 'a.mp4', size: 100, mimeType: 'video/mp4', storageKey: 'c1' });
+      dbModule.setBytesReceived('c1', 40);
+
+      await request(buildApp()).delete('/uploads/c1').expect(204);
+
+      expect(remove).toHaveBeenCalledWith('c1');
+      expect(dbModule.getUpload('c1')?.status).toBe('cancelled');
+      expect(broadcastSpy).toHaveBeenCalledWith({
+        uploadId: 'c1',
+        status: 'cancelled',
+        bytesReceived: 40,
+        bytesTotal: 100,
+      });
+    });
+
+    it('cancels an error/abandoned row whose object is already gone, without throwing', async () => {
+      remove.mockRejectedValue(
+        Object.assign(new Error('not found'), { status_code: 404, code: 'NoSuchUpload' }),
+      );
+      dbModule.insertUpload({ id: 'c2', filename: 'a.mp4', size: 100, mimeType: 'video/mp4', storageKey: 'c2' });
+      dbModule.markUploadStatus('c2', 'abandoned');
+
+      await request(buildApp()).delete('/uploads/c2').expect(204);
+
+      expect(dbModule.getUpload('c2')?.status).toBe('cancelled');
+    });
+
+    it('is idempotent: a second DELETE on an already-cancelled row is a no-op', async () => {
+      dbModule.insertUpload({ id: 'c3', filename: 'a.mp4', size: 100, mimeType: 'video/mp4', storageKey: 'c3' });
+      dbModule.markUploadStatus('c3', 'cancelled');
+
+      await request(buildApp()).delete('/uploads/c3').expect(204);
+
+      expect(remove).not.toHaveBeenCalled();
+      expect(dbModule.getUpload('c3')?.status).toBe('cancelled');
+    });
+
+    it('is a no-op (still 204) for an unknown upload', async () => {
+      await request(buildApp()).delete('/uploads/does-not-exist').expect(204);
+
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it('does not touch an already-successful upload', async () => {
+      dbModule.insertUpload({ id: 'c4', filename: 'a.mp4', size: 100, mimeType: 'video/mp4', storageKey: 'c4' });
+      dbModule.markUploadStatus('c4', 'success');
+
+      await request(buildApp()).delete('/uploads/c4').expect(204);
+
+      expect(remove).not.toHaveBeenCalled();
+      expect(dbModule.getUpload('c4')?.status).toBe('success');
     });
   });
 });

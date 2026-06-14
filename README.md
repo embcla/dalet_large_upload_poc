@@ -109,6 +109,49 @@ protocol. This repo currently implements:
     `hashVerified === false`. Both hash computations are fire-and-forget and
     don't block queue progression.
 
+- **M9** — cancellation (§13): a new `cancelled` status — permanent and
+  user-initiated, distinct from the reversible `paused` and the
+  server-detected `abandoned`.
+  - **Per-file cancel (§13.1-13.6, 13.11, 13.12)**: every queue row gets an
+    `×` cancel button (for any non-`success` status, including already
+    `cancelled` rows reconstructed from the batch manifest). For a
+    `queued`/already-`cancelled` row, it's removed from the queue locally
+    with no network call. For `uploading`/`paused`/`error`/`abandoned`, the
+    item's status flips immediately to a local-only `cancelling…` and
+    `item.tusUpload.abort(true)` both aborts any in-flight request and sends
+    the tus-protocol `DELETE /uploads/:id`. A new `router.delete
+    ('/uploads/:id', ...)` (mounted ahead of the tus catch-all, so it
+    intercepts this `DELETE` before `@tus/server`'s own `DeleteHandler`)
+    aborts the S3 multipart upload (reusing M2's `abortUpload`, which now
+    also tolerates `@tus/s3-store`'s mis-detected raw-AWS-SDK
+    `NoSuchKey`/`NoSuchUpload`/`NotFound` errors — see `cleanup.ts`), marks
+    the row `cancelled`, and broadcasts a `cancelled` event over the M5 SSE
+    channel, which flips the frontend's `cancelling…` to a terminal
+    `Cancelled` (styled distinctly from `Abandoned`). The endpoint is
+    idempotent: a second `DELETE` (or one for an unknown id, or a
+    `success` row) is a no-op `204`. To prevent a late in-flight chunk's
+    `uploading` progress event from reverting `Cancelled` back to
+    `cancelling…`, `tus.ts`'s `POST_RECEIVE`/`POST_RECEIVE_V2` handlers now
+    suppress further progress for any upload already marked `cancelled`.
+  - **Batch cancel (§13.7-13.10)**: a "Cancel remaining" button (shown
+    whenever any item is `queued`/`uploading`/`paused`/`error`/`abandoned`)
+    reveals an inline "Cancel remaining uploads? This cannot be undone."
+    confirmation with `Yes, cancel`/`No`. Confirming drops all `queued`
+    items immediately, aborts the active item's in-flight `tusUpload`, sets
+    every remaining non-terminal item to `cancelling…`, and issues one
+    `DELETE /batches/:batchKey` per distinct `batchKey` among them. That new
+    `router.delete('/batches/:batchKey', ...)` route returns `204`
+    immediately, then processes each non-`success`/non-`cancelled` row in
+    the batch sequentially (`abortUpload` + `markUploadStatus('cancelled')`
+    + SSE `cancelled` broadcast) — already-`success` rows are left untouched.
+  - A `process.on('unhandledRejection'/'uncaughtException')` guard was added
+    in `backend/src/index.ts`: a `DELETE` racing a concurrent in-flight
+    `PATCH`'s S3 part upload on the same MinIO multipart upload can surface
+    as a detached promise rejection deep in `@tus/s3-store`'s AWS-SDK
+    streaming internals; this keeps the process alive (the affected request
+    simply surfaces as an upload error to that one client) instead of
+    crashing every other upload in flight.
+
 ## Repo layout
 
 ```
@@ -338,6 +381,18 @@ row has matching `client_file_hash`/`server_file_hash`. A second upload posts
 a deliberately wrong hash and asserts `hashVerified: false`, `status: 'error'`
 over SSE and in the DB.
 
+`m9-cancel.test.ts` (§13) covers `DELETE /uploads/:id` and `DELETE
+/batches/:batchKey`: cancelling an in-progress upload marks its row
+`cancelled`, aborts its S3 multipart upload, and broadcasts a `cancelled` SSE
+event; cancelling an already-`abandoned` upload whose object is already gone
+is a no-op `204` with no throw; a second `DELETE` on an already-`cancelled`
+row is idempotent (`204`, no extra SSE event); `DELETE` on an unknown id is
+also a no-op `204`. The batch endpoint returns `204` promptly (asserted via
+wall-clock time) and then cancels each non-`success` row in the batch one at
+a time (SSE `cancelled` event observed for the in-progress row), leaving an
+already-`success` row in the same batch untouched; an unknown/empty batch key
+is a no-op `204`.
+
 ```sh
 cd tests
 npm install
@@ -395,3 +450,15 @@ byte count captured before reload, then reaches `success` ("Upload
 complete"). A `✓ verified` badge then appears once the client/server
 integrity hashes reconcile, and the final object checksum matches the source
 file.
+
+`m9-cancel.spec.ts` (§13) covers the cancel UI end-to-end (run serially: all
+three tests share the toxiproxy-throttled connection). It selects a file,
+waits for visible progress, clicks the row's `×`, and confirms the
+`Cancelling…`/`Cancelled` transition. It then selects 3 files and clicks `×`
+on the still-`queued` third one, confirming it's dropped from the list
+immediately with the other two unaffected. Finally it selects 3 files
+(one small enough to complete immediately), clicks "Cancel remaining",
+confirms "No" dismisses the confirmation with no effect, then "Yes, cancel"
+drops the queued item, cancels the in-progress item
+(`Cancelling…`/`Cancelled`), and leaves the already-completed item's "Upload
+complete" untouched.

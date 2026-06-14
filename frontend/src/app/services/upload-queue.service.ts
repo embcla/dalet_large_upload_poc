@@ -14,7 +14,9 @@ export type UploadStatus =
   | 'abandoned'
   | 'skipped'
   | 'queued'
-  | 'corrupt';
+  | 'corrupt'
+  | 'cancelling'
+  | 'cancelled';
 
 /** Shape of an entry returned by `GET /batches/:batchKey` (M8 §12.3-12.8). */
 interface BatchManifestEntry {
@@ -111,7 +113,13 @@ export class UploadQueueService {
       return 'corrupt';
     }
 
-    if (event && (event.status === 'success' || event.status === 'error' || event.status === 'abandoned')) {
+    if (
+      event &&
+      (event.status === 'success' ||
+        event.status === 'error' ||
+        event.status === 'abandoned' ||
+        event.status === 'cancelled')
+    ) {
       return event.status;
     }
 
@@ -238,6 +246,112 @@ export class UploadQueueService {
     this.processNext();
   }
 
+  /**
+   * Permanent, user-initiated cancellation of a single item (M9 §13.1-13.6,
+   * §13.11). A `queued` or already-`cancelled` item is just removed from the
+   * queue (nothing to tell the server). Otherwise the item is marked
+   * `cancelling` locally — the SSE-pushed `cancelled` event (once the server
+   * confirms) flips it to `cancelled` via `displayStatus`'s terminal-event
+   * override.
+   */
+  cancel(item: QueueItem): void {
+    const status = this.displayStatus(item);
+
+    if (status === 'queued' || status === 'cancelled') {
+      this.removeItem(item);
+      return;
+    }
+
+    item.status.set('cancelling');
+    this.terminate(item);
+
+    if (status === 'uploading') {
+      this.processNext();
+    }
+  }
+
+  /** True if any item could still be cancelled via "Cancel remaining" (M9 §13.7/13.8). */
+  readonly hasCancellableItems = computed<boolean>(() => {
+    return this.items().some((item) => {
+      const status = this.displayStatus(item);
+      return (
+        status === 'queued' ||
+        status === 'uploading' ||
+        status === 'paused' ||
+        status === 'error' ||
+        status === 'abandoned'
+      );
+    });
+  });
+
+  /** Whether the "Cancel remaining" confirmation prompt is shown (M9 §13.7). */
+  readonly confirmingCancelAll = signal(false);
+
+  requestCancelAll(): void {
+    this.confirmingCancelAll.set(true);
+  }
+
+  dismissCancelAll(): void {
+    this.confirmingCancelAll.set(false);
+  }
+
+  /**
+   * "Cancel remaining" (M9 §13.7/13.8): drops not-yet-started items, marks
+   * every other non-terminal item `cancelling`, stops the active upload's
+   * in-flight request immediately, and asks the server to cancel the rest of
+   * each affected batch.
+   */
+  confirmCancelAll(): void {
+    this.confirmingCancelAll.set(false);
+
+    const activeItem = this.activeItem();
+    const activeWasUploading = activeItem !== undefined && this.displayStatus(activeItem) === 'uploading';
+
+    const batchKeys = new Set<string>();
+    const remaining = this.items().filter((item) => {
+      const status = this.displayStatus(item);
+      if (status === 'queued') {
+        return false;
+      }
+      if (status === 'uploading' || status === 'paused' || status === 'error' || status === 'abandoned') {
+        batchKeys.add(item.batchKey);
+        item.status.set('cancelling');
+      }
+      return true;
+    });
+    this.items.set(remaining);
+
+    if (activeWasUploading) {
+      activeItem?.tusUpload?.abort(true).catch(() => {});
+    }
+    this.activeIndex.set(-1);
+
+    for (const batchKey of batchKeys) {
+      fetch(`${environment.apiBaseUrl}/batches/${batchKey}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+
+  /** Sends the server-side cancellation for `item` (M9 §13.1-13.6). */
+  private terminate(item: QueueItem): void {
+    if (item.tusUpload?.url) {
+      item.tusUpload.abort(true).catch(() => {});
+      return;
+    }
+    const id = item.uploadId();
+    if (id) {
+      tus.Upload.terminate(`${environment.apiBaseUrl}/uploads/${id}`, { retryDelays: null }).catch(() => {});
+    }
+  }
+
+  /** Removes `item` from the queue, keeping `activeIndex` pointed at the same item (if any). */
+  private removeItem(item: QueueItem): void {
+    const items = this.items();
+    const activeItem = this.activeIndex() === -1 ? undefined : items[this.activeIndex()];
+    const newItems = items.filter((i) => i !== item);
+    this.items.set(newItems);
+    this.activeIndex.set(activeItem ? newItems.indexOf(activeItem) : -1);
+  }
+
   private activeItem(): QueueItem | undefined {
     const index = this.activeIndex();
     return index === -1 ? undefined : this.items()[index];
@@ -284,6 +398,14 @@ export class UploadQueueService {
     };
 
     if (!manifestEntry || manifestEntry.status === 'abandoned' || manifestEntry.status === 'error') {
+      return item;
+    }
+
+    if (manifestEntry.status === 'cancelled') {
+      item.status.set('cancelled');
+      item.uploadId.set(manifestEntry.id);
+      item.bytesUploaded.set(manifestEntry.bytesReceived);
+      item.bytesTotal.set(file.size);
       return item;
     }
 

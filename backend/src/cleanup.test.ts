@@ -68,4 +68,37 @@ describe('cleanup', () => {
     expect(cleaned).toBe(0);
     expect(remove).not.toHaveBeenCalled();
   });
+
+  describe('abortUpload (M9 §13)', () => {
+    it('tolerates ERRORS.FILE_NOT_FOUND from the datastore', async () => {
+      const remove = jest.fn().mockRejectedValue(ERRORS.FILE_NOT_FOUND);
+      await expect(cleanupModule.abortUpload(fakeDatastore(remove), 'gone')).resolves.toBeUndefined();
+    });
+
+    it('tolerates a raw AWS SDK NoSuchKey error (e.g. .info already deleted)', async () => {
+      const error = Object.assign(new Error('NoSuchKey'), {
+        name: 'NoSuchKey',
+        Code: 'NoSuchKey',
+        $metadata: { httpStatusCode: 404 },
+      });
+      const remove = jest.fn().mockRejectedValue(error);
+      await expect(cleanupModule.abortUpload(fakeDatastore(remove), 'gone')).resolves.toBeUndefined();
+    });
+
+    it('tolerates a raw AWS SDK NoSuchUpload error', async () => {
+      const error = Object.assign(new Error('NoSuchUpload'), {
+        name: 'NoSuchUpload',
+        Code: 'NoSuchUpload',
+        $metadata: { httpStatusCode: 404 },
+      });
+      const remove = jest.fn().mockRejectedValue(error);
+      await expect(cleanupModule.abortUpload(fakeDatastore(remove), 'gone')).resolves.toBeUndefined();
+    });
+
+    it('rethrows other errors', async () => {
+      const error = new Error('boom');
+      const remove = jest.fn().mockRejectedValue(error);
+      await expect(cleanupModule.abortUpload(fakeDatastore(remove), 'broken')).rejects.toThrow('boom');
+    });
+  });
 });

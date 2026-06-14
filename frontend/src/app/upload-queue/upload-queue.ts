@@ -63,4 +63,41 @@ export class UploadQueue implements OnInit {
   skip(): void {
     this.queue.skip();
   }
+
+  cancel(item: QueueItem): void {
+    this.queue.cancel(item);
+  }
+
+  /** Whether the per-row "x" cancel button is shown for `item` (M9 §13.11). */
+  showCancelButton(item: QueueItem): boolean {
+    const status = this.displayStatus(item);
+    return (
+      status === 'queued' ||
+      status === 'uploading' ||
+      status === 'paused' ||
+      status === 'error' ||
+      status === 'abandoned' ||
+      status === 'cancelled'
+    );
+  }
+
+  hasCancellableItems(): boolean {
+    return this.queue.hasCancellableItems();
+  }
+
+  confirmingCancelAll(): boolean {
+    return this.queue.confirmingCancelAll();
+  }
+
+  requestCancelAll(): void {
+    this.queue.requestCancelAll();
+  }
+
+  dismissCancelAll(): void {
+    this.queue.dismissCancelAll();
+  }
+
+  confirmCancelAll(): void {
+    this.queue.confirmCancelAll();
+  }
 }

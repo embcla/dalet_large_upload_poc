@@ -63,9 +63,11 @@ describe('UploadQueue', () => {
       this.url = null;
       this.options = options;
       this.start = vi.fn();
-      this.abort = vi.fn();
+      this.abort = vi.fn().mockResolvedValue(undefined);
       uploads.push(this);
     } as unknown as typeof tus.Upload);
+
+    vi.spyOn(tus.Upload, 'terminate').mockResolvedValue(undefined);
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response()));
     navigator.sendBeacon = vi.fn().mockReturnValue(true);
@@ -148,13 +150,13 @@ describe('UploadQueue', () => {
     await selectFiles([makeFile('a.mp4', 100)]);
 
     let item = fixture.nativeElement.querySelector('.queue-item');
-    expect(item.querySelector('button')?.textContent).toContain('Pause');
+    expect(item.querySelector('button:not(.cancel-btn)')?.textContent).toContain('Pause');
 
     component.pause();
     fixture.detectChanges();
 
     item = fixture.nativeElement.querySelector('.queue-item');
-    expect(item.querySelector('button')?.textContent).toContain('Resume');
+    expect(item.querySelector('button:not(.cancel-btn)')?.textContent).toContain('Resume');
   });
 
   it('shows Retry and Skip buttons when the active item errors', async () => {
@@ -164,7 +166,9 @@ describe('UploadQueue', () => {
     fixture.detectChanges();
 
     const item = fixture.nativeElement.querySelector('.queue-item');
-    const buttons = Array.from(item.querySelectorAll('button')).map((b) => (b as HTMLButtonElement).textContent);
+    const buttons = Array.from(item.querySelectorAll('button:not(.cancel-btn)')).map(
+      (b) => (b as HTMLButtonElement).textContent,
+    );
     expect(buttons).toEqual(['Retry', 'Skip']);
     expect(item.querySelector('.message--error')?.textContent).toContain('boom');
   });
@@ -179,5 +183,88 @@ describe('UploadQueue', () => {
 
     const item = fixture.nativeElement.querySelector('.queue-item');
     expect(item.querySelector('.message--success')?.textContent).toContain('Upload complete');
+  });
+
+  describe('cancel (M9 §13)', () => {
+    it('shows a cancel button for queued/uploading/paused/error/abandoned items but not for success', async () => {
+      await selectFiles([makeFile('a.mp4', 100), makeFile('b.mp4', 200)]);
+
+      let items = fixture.nativeElement.querySelectorAll('.queue-item');
+      expect(items[0].querySelector('.cancel-btn')).not.toBeNull(); // uploading
+      expect(items[1].querySelector('.cancel-btn')).not.toBeNull(); // queued
+
+      makeUploadUrlAvailable(uploads[0], 'u1');
+      progressService.emit({ uploadId: 'u1', status: 'success', bytesReceived: 100, bytesTotal: 100 });
+      uploads[0].options.onSuccess?.({ lastResponse: {} as tus.HttpResponse });
+      fixture.detectChanges();
+
+      items = fixture.nativeElement.querySelectorAll('.queue-item');
+      expect(items[0].querySelector('.cancel-btn')).toBeNull(); // success
+    });
+
+    it('clicking the cancel button calls queue.cancel(item) and moves the item to cancelling/cancelled', async () => {
+      await selectFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      const cancelSpy = vi.spyOn(component.queue, 'cancel');
+
+      const item = fixture.nativeElement.querySelector('.queue-item');
+      (item.querySelector('.cancel-btn') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(cancelSpy).toHaveBeenCalledWith(component.queue.items()[0]);
+      expect(item.querySelector('.message--cancelling')?.textContent).toContain('Cancelling');
+
+      progressService.emit({ uploadId: 'u1', status: 'cancelled', bytesReceived: 50, bytesTotal: 100 });
+      fixture.detectChanges();
+
+      expect(item.querySelector('.message--cancelled')?.textContent).toContain('Cancelled');
+    });
+
+    it('hides "Cancel remaining" when the queue is empty, shows it once a file is queued', async () => {
+      expect(fixture.nativeElement.querySelector('.cancel-all')).toBeNull();
+
+      await selectFiles([makeFile('a.mp4', 100)]);
+
+      expect(fixture.nativeElement.querySelector('.cancel-all')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('.cancel-all button')?.textContent).toContain('Cancel remaining');
+    });
+
+    it('clicking "Cancel remaining" shows the confirm/deny UI without cancelling; "No" dismisses it', async () => {
+      await selectFiles([makeFile('a.mp4', 100)]);
+      const confirmAllSpy = vi.spyOn(component.queue, 'confirmCancelAll');
+
+      (fixture.nativeElement.querySelector('.cancel-all button') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.cancel-all__confirm')?.textContent).toContain(
+        'Cancel remaining uploads?',
+      );
+      expect(confirmAllSpy).not.toHaveBeenCalled();
+
+      const buttons = Array.from(fixture.nativeElement.querySelectorAll('.cancel-all__confirm button')) as HTMLButtonElement[];
+      const noButton = buttons.find((b) => b.textContent?.includes('No'));
+      noButton?.click();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.cancel-all__confirm')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.cancel-all button')?.textContent).toContain('Cancel remaining');
+      expect(confirmAllSpy).not.toHaveBeenCalled();
+    });
+
+    it('clicking "Yes, cancel" calls confirmCancelAll', async () => {
+      await selectFiles([makeFile('a.mp4', 100)]);
+      const confirmAllSpy = vi.spyOn(component.queue, 'confirmCancelAll');
+
+      (fixture.nativeElement.querySelector('.cancel-all button') as HTMLButtonElement).click();
+      fixture.detectChanges();
+
+      const buttons = Array.from(fixture.nativeElement.querySelectorAll('.cancel-all__confirm button')) as HTMLButtonElement[];
+      const yesButton = buttons.find((b) => b.textContent?.includes('Yes, cancel'));
+      yesButton?.click();
+      fixture.detectChanges();
+
+      expect(confirmAllSpy).toHaveBeenCalled();
+    });
   });
 });

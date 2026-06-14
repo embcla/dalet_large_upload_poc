@@ -17,7 +17,7 @@ export function getDb(): Database.Database {
   return db;
 }
 
-export type UploadStatus = 'uploading' | 'paused' | 'success' | 'error' | 'abandoned';
+export type UploadStatus = 'uploading' | 'paused' | 'success' | 'error' | 'abandoned' | 'cancelled';
 
 export interface UploadRow {
   id: string;
@@ -252,6 +252,17 @@ export function getUploadsByBatchKey(batchKey: string): UploadRow[] {
 
   return Array.from(byPosition.values()).sort(
     (a, b) => (a.batch_position ?? 0) - (b.batch_position ?? 0),
+  );
+}
+
+/**
+ * Rows belonging to a batch that are still cancellable (M9 §13.8 "Cancel
+ * remaining") — i.e. not already `success` or `cancelled`. Same
+ * dedup-by-`batch_position` ordering as `getUploadsByBatchKey`.
+ */
+export function getCancellableUploadsByBatchKey(batchKey: string): UploadRow[] {
+  return getUploadsByBatchKey(batchKey).filter(
+    (row) => row.status !== 'success' && row.status !== 'cancelled',
   );
 }
 

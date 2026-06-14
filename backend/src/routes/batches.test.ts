@@ -3,11 +3,14 @@ import os from 'os';
 import path from 'path';
 import express from 'express';
 import request from 'supertest';
+import type { S3Store } from '@tus/s3-store';
 
 describe('batches routes (M8 §12.3-12.8 manifest, §12.1/12.2 pong)', () => {
   let tmpDir: string;
   let dbModule: typeof import('../db');
+  let progressModule: typeof import('../progress');
   let createBatchesRouter: typeof import('./batches').createBatchesRouter;
+  let remove: jest.Mock;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'batches-route-test-'));
@@ -17,7 +20,11 @@ describe('batches routes (M8 §12.3-12.8 manifest, §12.1/12.2 pong)', () => {
     dbModule = require('../db');
     dbModule.runMigrations();
     // eslint-disable-next-line @typescript-eslint/no-var-requires
+    progressModule = require('../progress');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     ({ createBatchesRouter } = require('./batches'));
+
+    remove = jest.fn().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -27,8 +34,20 @@ describe('batches routes (M8 §12.3-12.8 manifest, §12.1/12.2 pong)', () => {
 
   function buildApp() {
     const app = express();
-    app.use(createBatchesRouter());
+    const datastore = { remove } as unknown as S3Store;
+    app.use(createBatchesRouter(datastore));
     return app;
+  }
+
+  /** Polls `check` until it returns truthy or `timeoutMs` elapses. */
+  async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
+    const start = Date.now();
+    while (!check()) {
+      if (Date.now() - start > timeoutMs) {
+        throw new Error('waitFor: timed out');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
   }
 
   describe('GET /batches/:batchKey', () => {
@@ -126,6 +145,115 @@ describe('batches routes (M8 §12.3-12.8 manifest, §12.1/12.2 pong)', () => {
 
     it('is a no-op (still 204) for a batch with no active row', async () => {
       await request(buildApp()).post('/batches/does-not-exist/pong').expect(204);
+    });
+  });
+
+  describe('DELETE /batches/:batchKey (M9 §13.8)', () => {
+    it('returns 204 promptly and cancels the non-success row without touching the success row', async () => {
+      dbModule.insertUpload({
+        id: 'done',
+        filename: 'a.mp4',
+        size: 100,
+        mimeType: 'video/mp4',
+        storageKey: 'done',
+        batchKey: 'batch-cancel',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('done', 'success');
+      dbModule.setBytesReceived('done', 100);
+
+      dbModule.insertUpload({
+        id: 'in-progress',
+        filename: 'b.mp4',
+        size: 200,
+        mimeType: 'video/mp4',
+        storageKey: 'in-progress',
+        batchKey: 'batch-cancel',
+        batchPosition: 1,
+      });
+      dbModule.setBytesReceived('in-progress', 50);
+
+      const broadcastSpy = jest.spyOn(progressModule, 'broadcast');
+
+      const start = Date.now();
+      await request(buildApp()).delete('/batches/batch-cancel').expect(204);
+      expect(Date.now() - start).toBeLessThan(500);
+
+      await waitFor(() => dbModule.getUpload('in-progress')?.status === 'cancelled');
+
+      expect(remove).toHaveBeenCalledWith('in-progress');
+      expect(remove).not.toHaveBeenCalledWith('done');
+      expect(dbModule.getUpload('done')?.status).toBe('success');
+      expect(broadcastSpy).toHaveBeenCalledWith({
+        uploadId: 'in-progress',
+        status: 'cancelled',
+        bytesReceived: 50,
+        bytesTotal: 200,
+      });
+      expect(broadcastSpy).not.toHaveBeenCalledWith(expect.objectContaining({ uploadId: 'done' }));
+    });
+
+    it('processes multiple non-terminal rows sequentially in batch_position order', async () => {
+      dbModule.insertUpload({
+        id: 'first',
+        filename: 'a.mp4',
+        size: 100,
+        mimeType: 'video/mp4',
+        storageKey: 'first',
+        batchKey: 'batch-multi',
+        batchPosition: 0,
+      });
+      dbModule.insertUpload({
+        id: 'second',
+        filename: 'b.mp4',
+        size: 100,
+        mimeType: 'video/mp4',
+        storageKey: 'second',
+        batchKey: 'batch-multi',
+        batchPosition: 1,
+      });
+
+      const order: string[] = [];
+      jest.spyOn(progressModule, 'broadcast').mockImplementation((event) => {
+        order.push(event.uploadId);
+      });
+
+      await request(buildApp()).delete('/batches/batch-multi').expect(204);
+
+      await waitFor(() => order.length === 2);
+
+      expect(order).toEqual(['first', 'second']);
+      expect(dbModule.getUpload('first')?.status).toBe('cancelled');
+      expect(dbModule.getUpload('second')?.status).toBe('cancelled');
+    });
+
+    it('is a no-op (204, no broadcasts) for a batch where everything is already success/cancelled', async () => {
+      dbModule.insertUpload({
+        id: 'already-done',
+        filename: 'a.mp4',
+        size: 100,
+        mimeType: 'video/mp4',
+        storageKey: 'already-done',
+        batchKey: 'batch-done',
+        batchPosition: 0,
+      });
+      dbModule.markUploadStatus('already-done', 'success');
+
+      const broadcastSpy = jest.spyOn(progressModule, 'broadcast');
+
+      await request(buildApp()).delete('/batches/batch-done').expect(204);
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(remove).not.toHaveBeenCalled();
+      expect(broadcastSpy).not.toHaveBeenCalled();
+      expect(dbModule.getUpload('already-done')?.status).toBe('success');
+    });
+
+    it('is a no-op (204) for an unknown batch key', async () => {
+      await request(buildApp()).delete('/batches/does-not-exist').expect(204);
+
+      expect(remove).not.toHaveBeenCalled();
     });
   });
 });

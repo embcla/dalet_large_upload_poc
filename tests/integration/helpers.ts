@@ -345,6 +345,19 @@ export async function pong(batchKey: string): Promise<Response> {
   return fetch(`${BACKEND_URL}/batches/${batchKey}/pong`, { method: 'POST' });
 }
 
+/**
+ * Sends the tus-protocol termination request (M9 §13), mirroring
+ * `tus.Upload#abort(true)`.
+ */
+export async function terminateUpload(uploadUrl: string): Promise<Response> {
+  return fetch(uploadUrl, { method: 'DELETE', headers: { 'Tus-Resumable': '1.0.0' } });
+}
+
+/** "Cancel remaining" for a whole batch (M9 §13.8). */
+export async function deleteBatch(batchKey: string): Promise<Response> {
+  return fetch(`${BACKEND_URL}/batches/${batchKey}`, { method: 'DELETE' });
+}
+
 export async function postClientHash(uploadId: string, hash: string): Promise<Response> {
   return fetch(`${TUS_ENDPOINT}/${uploadId}/client-hash`, {
     method: 'POST',

@@ -17,9 +17,26 @@
       <span class="progress-percent">{{ queue.aggregateProgressPercent() }}%</span>
     </div>
 
+    @if (hasCancellableItems()) {
+      <div class="cancel-all">
+        @if (confirmingCancelAll()) {
+          <span class="cancel-all__confirm">
+            Cancel remaining uploads? This cannot be undone.
+            <button type="button" (click)="confirmCancelAll()">Yes, cancel</button>
+            <button type="button" (click)="dismissCancelAll()">No</button>
+          </span>
+        } @else {
+          <button type="button" (click)="requestCancelAll()">Cancel remaining</button>
+        }
+      </div>
+    }
+
     <ul class="queue-list">
       @for (item of queue.items(); track item.id) {
         <li class="queue-item">
+          @if (showCancelButton(item)) {
+            <button type="button" class="cancel-btn" (click)="cancel(item)" aria-label="Cancel">&times;</button>
+          }
           <p class="file-name">{{ item.name }}</p>
           <span class="file-size">{{ formatSize(item.size) }}</span>
 
@@ -73,6 +90,14 @@
                 <span class="status-icon" aria-hidden="true">&#10007;</span> Integrity check failed
               </p>
               <button type="button" (click)="skip()">Skip</button>
+            }
+            @case ('cancelling') {
+              <p class="message message--cancelling">Cancelling…</p>
+            }
+            @case ('cancelled') {
+              <p class="message message--cancelled">
+                <span class="status-icon" aria-hidden="true">&#10007;</span> Cancelled
+              </p>
             }
           }
         </li>

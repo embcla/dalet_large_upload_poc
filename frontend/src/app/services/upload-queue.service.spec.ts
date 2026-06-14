@@ -107,9 +107,11 @@ describe('UploadQueueService', () => {
       this.file = file as File;
       this.options = options;
       this.start = vi.fn();
-      this.abort = vi.fn();
+      this.abort = vi.fn().mockResolvedValue(undefined);
       uploads.push(this);
     } as unknown as typeof tus.Upload);
+
+    vi.spyOn(tus.Upload, 'terminate').mockResolvedValue(undefined);
 
     vi.stubGlobal(
       'fetch',
@@ -481,6 +483,159 @@ describe('UploadQueueService', () => {
 
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/pong'))).toBe(false);
+  });
+
+  function deleteCalls(): string[] {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    return fetchMock.mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+      .map(([url]) => String(url));
+  }
+
+  describe('cancel (M9 §13)', () => {
+    it('removes a queued item without any server call', async () => {
+      const files = [makeFile('a.mp4', 100), makeFile('b.mp4', 200)];
+      await service.addFiles(files);
+
+      const queuedItem = service.items()[1];
+      service.cancel(queuedItem);
+
+      expect(service.items()).toHaveLength(1);
+      expect(service.items()[0].name).toBe('a.mp4');
+      expect(service.activeIndex()).toBe(0);
+      expect(deleteCalls()).toHaveLength(0);
+    });
+
+    it('cancels the active uploading item: aborts with terminate, sets cancelling, and advances the queue', async () => {
+      const files = [makeFile('a.mp4', 100), makeFile('b.mp4', 200)];
+      await service.addFiles(files);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      const activeItem = service.items()[0];
+      service.cancel(activeItem);
+
+      expect(uploads[0].abort).toHaveBeenCalledWith(true);
+      expect(activeItem.status()).toBe('cancelling');
+      expect(uploads).toHaveLength(2); // next item started
+      expect(service.activeIndex()).toBe(1);
+    });
+
+    it('cancels a paused item via abort(true), setting it to cancelling', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      service.pause();
+      const item = service.items()[0];
+      expect(service.displayStatus(item)).toBe('paused');
+
+      service.cancel(item);
+
+      expect(uploads[0].abort).toHaveBeenCalledWith(true);
+      expect(item.status()).toBe('cancelling');
+    });
+
+    it('displayStatus reflects the SSE-confirmed cancelled status once it arrives', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      const item = service.items()[0];
+      service.cancel(item);
+      expect(service.displayStatus(item)).toBe('cancelling');
+
+      progressService.emit({ uploadId: 'u1', status: 'cancelled', bytesReceived: 50, bytesTotal: 100 });
+
+      expect(service.displayStatus(item)).toBe('cancelled');
+    });
+
+    it('displayStatus stays cancelling if no SSE confirmation arrives', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      const item = service.items()[0];
+      service.cancel(item);
+
+      expect(service.displayStatus(item)).toBe('cancelling');
+    });
+
+    it('removes an already-cancelled item without any server call', async () => {
+      const file = makeFile('a.mp4', 100);
+      const [sorted] = sortFingerprint([file]);
+      const batchKey = await computeBatchKey([sorted]);
+      manifestResponses.set(batchKey, [
+        {
+          id: 'prev-cancelled',
+          filename: 'a.mp4',
+          size: 100,
+          lastModified: file.lastModified,
+          batchPosition: 0,
+          status: 'cancelled',
+          bytesReceived: 30,
+          storageKey: 'prev-cancelled',
+        },
+      ]);
+
+      await service.addFiles([file]);
+      expect(service.items()[0].status()).toBe('cancelled');
+      expect(uploads).toHaveLength(0);
+
+      service.cancel(service.items()[0]);
+
+      expect(service.items()).toHaveLength(0);
+      expect(deleteCalls()).toHaveLength(0);
+    });
+  });
+
+  describe('hasCancellableItems / Cancel remaining (M9 §13.7/13.8)', () => {
+    it('is false for an empty queue and true once a file is queued', async () => {
+      expect(service.hasCancellableItems()).toBe(false);
+
+      await service.addFiles([makeFile('a.mp4', 100)]);
+
+      expect(service.hasCancellableItems()).toBe(true);
+    });
+
+    it('requestCancelAll only flips the confirmation flag, issuing no fetch', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+
+      service.requestCancelAll();
+
+      expect(service.confirmingCancelAll()).toBe(true);
+      expect(deleteCalls()).toHaveLength(0);
+    });
+
+    it('dismissCancelAll hides the confirmation without side effects', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+
+      service.requestCancelAll();
+      service.dismissCancelAll();
+
+      expect(service.confirmingCancelAll()).toBe(false);
+      expect(deleteCalls()).toHaveLength(0);
+    });
+
+    it('confirmCancelAll drops queued items, marks the active upload cancelling, aborts it, and issues one batch DELETE', async () => {
+      const files = [makeFile('a.mp4', 100), makeFile('b.mp4', 200)];
+      await service.addFiles(files);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      const [first, second] = service.items();
+      const batchKey = first.batchKey;
+
+      service.requestCancelAll();
+      service.confirmCancelAll();
+
+      expect(service.confirmingCancelAll()).toBe(false);
+      // queued item dropped entirely
+      expect(service.items()).toHaveLength(1);
+      expect(service.items()).toEqual([first]);
+      expect(service.items()).not.toContain(second);
+
+      expect(first.status()).toBe('cancelling');
+      expect(uploads[0].abort).toHaveBeenCalledWith(true);
+      expect(service.activeIndex()).toBe(-1);
+
+      expect(deleteCalls()).toEqual([`${environment.apiBaseUrl}/batches/${batchKey}`]);
+    });
   });
 
   it('verifies integrity via SHA-256 after onSuccess without blocking processNext (M8 §12.9-12.11)', async () => {

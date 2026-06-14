@@ -3,7 +3,7 @@ import { EVENTS } from '@tus/utils';
 import { S3Store } from '@tus/s3-store';
 import type { Request, Response, NextFunction } from 'express';
 import { config, isAcceptedExtension } from './config';
-import { insertUpload, markUploadStatus, setBytesReceived, setProbedMetadata, setServerFileHash } from './db';
+import { getUpload, insertUpload, markUploadStatus, setBytesReceived, setProbedMetadata, setServerFileHash } from './db';
 import { computeServerHash } from './integrity';
 import { probeObject } from './ffprobe';
 import { broadcast, maybeBroadcastIntegrity } from './progress';
@@ -97,7 +97,16 @@ export function createTusHandler(datastore: S3Store) {
 
   // M5 §9.4: emits a throttled progress event (and persists bytes_received)
   // as bytes are written, via POST_RECEIVE_V2 (the non-deprecated event).
+  //
+  // M9 §13: a chunk that was in flight when the upload got cancelled can
+  // still finish writing and fire this event afterwards. If it broadcast
+  // 'uploading' after the DELETE handler's 'cancelled' broadcast, the
+  // frontend would see 'uploading' as the latest event and get stuck on
+  // "Cancelling...". Once cancelled, suppress further progress for this id.
   server.on(EVENTS.POST_RECEIVE_V2, (_req, upload) => {
+    if (getUpload(upload.id)?.status === 'cancelled') {
+      return;
+    }
     setBytesReceived(upload.id, upload.offset);
     broadcast({
       uploadId: upload.id,
@@ -112,10 +121,25 @@ export function createTusHandler(datastore: S3Store) {
   // resumed chunk) would otherwise leave bytes_received stale for the batch
   // manifest.
   server.on(EVENTS.POST_RECEIVE, (_req, _res, upload) => {
+    if (getUpload(upload.id)?.status === 'cancelled') {
+      return;
+    }
     setBytesReceived(upload.id, upload.offset);
   });
 
   return (req: Request, res: Response, _next: NextFunction) => {
-    server.handle(req, res);
+    // `server.handle` returns a promise that can reject if its own internal
+    // error-response write fails (e.g. a concurrent DELETE/abort races an
+    // in-flight PATCH's S3 part upload, which can surface as a write-after-
+    // abort here). Left unhandled, that rejection crashes the whole process.
+    server.handle(req, res).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error('Unhandled tus handler error', error);
+      if (!res.headersSent) {
+        res.status(500).end();
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    });
   };
 }

@@ -1,5 +1,8 @@
 import { Router } from 'express';
-import { getUploadsByBatchKey, touchLastSeenForBatch, UploadRow } from '../db';
+import type { S3Store } from '@tus/s3-store';
+import { getCancellableUploadsByBatchKey, getUploadsByBatchKey, markUploadStatus, touchLastSeenForBatch, UploadRow } from '../db';
+import { abortUpload } from '../cleanup';
+import { broadcast } from '../progress';
 
 export interface BatchManifestEntry {
   id: string;
@@ -30,7 +33,7 @@ function toManifestEntry(row: UploadRow): BatchManifestEntry {
  * across a page reload, and the pong endpoint that keeps a batch's active
  * upload alive (§12.1/12.2).
  */
-export function createBatchesRouter(): Router {
+export function createBatchesRouter(datastore: S3Store): Router {
   const router = Router();
 
   router.get('/batches/:batchKey', (req, res) => {
@@ -40,6 +43,27 @@ export function createBatchesRouter(): Router {
   router.post('/batches/:batchKey/pong', (req, res) => {
     touchLastSeenForBatch(req.params.batchKey);
     res.status(204).end();
+  });
+
+  // M9 §13.8: "Cancel remaining" - responds 204 once processing has started,
+  // then cancels each still-cancellable row in the batch one at a time
+  // (sequential, not Promise.all, so SSE events arrive progressively).
+  router.delete('/batches/:batchKey', (req, res) => {
+    const rows = getCancellableUploadsByBatchKey(req.params.batchKey);
+    res.status(204).end();
+
+    (async () => {
+      for (const row of rows) {
+        await abortUpload(datastore, row.id);
+        markUploadStatus(row.id, 'cancelled');
+        broadcast({
+          uploadId: row.id,
+          status: 'cancelled',
+          bytesReceived: row.bytes_received,
+          bytesTotal: row.size,
+        });
+      }
+    })();
   });
 
   return router;

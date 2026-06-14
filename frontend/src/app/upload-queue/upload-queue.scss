@@ -19,7 +19,9 @@
 }
 
 .queue-item {
+  position: relative;
   padding-top: 0.75rem;
+  padding-right: 1.75rem;
   border-top: 1px solid #eee;
 }
 
@@ -87,6 +89,41 @@ progress {
 }
 
 .message--corrupt {
+  color: #b00020;
+}
+
+.message--cancelling {
+  color: #6e7781;
+  font-style: italic;
+}
+
+.message--cancelled {
+  color: #b00020;
+  font-weight: 600;
+}
+
+.cancel-all {
+  margin-top: 0.75rem;
+}
+
+.cancel-all__confirm {
+  color: #b00020;
+}
+
+.cancel-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0;
+  margin: 0;
+  padding: 0 0.4rem;
+  line-height: 1.2;
+  font-size: 1.1rem;
+  color: #6e7781;
+  background: none;
+  border: none;
+}
+
+.cancel-btn:hover {
   color: #b00020;
 }
 

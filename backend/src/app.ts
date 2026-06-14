@@ -35,7 +35,7 @@ export function createApp(): Express {
   app.use(createUploadsRouter(datastore));
   app.use(createInternalRouter(datastore));
   app.use(createFilesRouter());
-  app.use(createBatchesRouter());
+  app.use(createBatchesRouter(datastore));
   app.use(createProgressRouter());
 
   const tusHandler = createTusHandler(datastore);
