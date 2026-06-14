@@ -2,7 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { FilesList } from './files-list';
-import { FileItem } from '../services/files.service';
+import { FileItem, FilesService } from '../services/files.service';
 import { environment } from '../../environments/environment';
 
 const playableFile: FileItem = {
@@ -95,5 +95,22 @@ describe('FilesList', () => {
     expect(compiled.querySelector('.message--error')?.textContent).toContain(
       'Preview not available for this format.',
     );
+  });
+
+  it('shows "file no longer available" when the selected file disappears from the list (M10 §14.3)', async () => {
+    await setup([playableFile]);
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    (compiled.querySelector('.file-item') as HTMLElement).click();
+    fixture.detectChanges();
+
+    expect(compiled.querySelector('video')).toBeTruthy();
+
+    const filesService = TestBed.inject(FilesService);
+    filesService.files.set([]);
+    fixture.detectChanges();
+
+    expect(compiled.querySelector('video')).toBeFalsy();
+    expect(compiled.querySelector('.message--missing')?.textContent).toContain('File no longer available.');
   });
 });

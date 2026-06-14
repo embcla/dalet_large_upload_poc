@@ -87,4 +87,17 @@ describe('FilesService', () => {
 
     httpMock.expectNone(`${environment.apiBaseUrl}/files`);
   });
+
+  it('removes the matching file when a missing event arrives, leaving other files untouched (M10 §14.3)', async () => {
+    const otherFile: FileItem = { ...sampleFile, id: 'f2', filename: 'other.mp4' };
+
+    const refreshPromise = service.refresh();
+    httpMock.expectOne(`${environment.apiBaseUrl}/files`).flush([sampleFile, otherFile]);
+    await refreshPromise;
+
+    progressService.emit({ uploadId: 'f1', status: 'missing', bytesReceived: 1234, bytesTotal: 1234 });
+    TestBed.flushEffects();
+
+    expect(service.files()).toEqual([otherFile]);
+  });
 });

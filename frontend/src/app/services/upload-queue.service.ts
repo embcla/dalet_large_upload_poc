@@ -16,7 +16,8 @@ export type UploadStatus =
   | 'queued'
   | 'corrupt'
   | 'cancelling'
-  | 'cancelled';
+  | 'cancelled'
+  | 'missing';
 
 /** Shape of an entry returned by `GET /batches/:batchKey` (M8 §12.3-12.8). */
 interface BatchManifestEntry {
@@ -94,11 +95,12 @@ export class UploadQueueService {
    * and local-only (SSE never reports `skipped`), so it's never overridden.
    * A failed integrity check (M8 §12.9-12.11) overrides everything else with
    * `corrupt`. Otherwise, a terminal SSE event (`success`/`error`/
-   * `abandoned`) for the item's `uploadId` wins over the local status — e.g.
-   * a server-pushed `abandoned` while the client still thinks it's
-   * `uploading`. A non-terminal SSE event (`uploading`/`paused`) never
-   * overrides the local status, so a fresher local transition (e.g.
-   * `onError`) isn't masked by a stale in-flight SSE event.
+   * `abandoned`/`cancelled`/`missing`) for the item's `uploadId` wins over
+   * the local status — e.g. a server-pushed `abandoned` while the client
+   * still thinks it's `uploading`. A non-terminal SSE event
+   * (`uploading`/`paused`) never overrides the local status, so a fresher
+   * local transition (e.g. `onError`) isn't masked by a stale in-flight SSE
+   * event.
    */
   displayStatus(item: QueueItem): UploadStatus {
     const localStatus = item.status();
@@ -118,7 +120,8 @@ export class UploadQueueService {
       (event.status === 'success' ||
         event.status === 'error' ||
         event.status === 'abandoned' ||
-        event.status === 'cancelled')
+        event.status === 'cancelled' ||
+        event.status === 'missing')
     ) {
       return event.status;
     }
@@ -247,17 +250,17 @@ export class UploadQueueService {
   }
 
   /**
-   * Permanent, user-initiated cancellation of a single item (M9 §13.1-13.6,
-   * §13.11). A `queued` or already-`cancelled` item is just removed from the
-   * queue (nothing to tell the server). Otherwise the item is marked
-   * `cancelling` locally — the SSE-pushed `cancelled` event (once the server
-   * confirms) flips it to `cancelled` via `displayStatus`'s terminal-event
-   * override.
+   * Permanent, user-initiated cancellation/dismissal of a single item (M9
+   * §13.1-13.6, §13.11; M10 §14.8). A `queued`, already-`cancelled`, or
+   * `missing` (M10 §14) item is just removed from the queue (nothing to tell
+   * the server). Otherwise the item is marked `cancelling` locally — the
+   * SSE-pushed `cancelled` event (once the server confirms) flips it to
+   * `cancelled` via `displayStatus`'s terminal-event override.
    */
   cancel(item: QueueItem): void {
     const status = this.displayStatus(item);
 
-    if (status === 'queued' || status === 'cancelled') {
+    if (status === 'queued' || status === 'cancelled' || status === 'missing') {
       this.removeItem(item);
       return;
     }
@@ -374,7 +377,8 @@ export class UploadQueueService {
    * `manifestEntry` is a completed (`success`) row, the item starts already
    * done with no `tus.Upload`. If it's still `uploading`/`paused`, the item
    * is queued for resume via `uploadUrl` (`startUpload`). Otherwise (no
-   * entry, or `abandoned`/`error`), it's a normal fresh upload.
+   * entry, or `abandoned`/`error`/`missing` — M10 §14.7), it's a normal
+   * fresh upload.
    */
   private createItem(
     file: File,
@@ -397,7 +401,12 @@ export class UploadQueueService {
       errorMessage: signal<string | null>(null),
     };
 
-    if (!manifestEntry || manifestEntry.status === 'abandoned' || manifestEntry.status === 'error') {
+    if (
+      !manifestEntry ||
+      manifestEntry.status === 'abandoned' ||
+      manifestEntry.status === 'error' ||
+      manifestEntry.status === 'missing'
+    ) {
       return item;
     }
 

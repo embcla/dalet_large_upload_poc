@@ -324,6 +324,12 @@ export async function runCleanup(): Promise<{ cleaned: number }> {
   return (await res.json()) as { cleaned: number };
 }
 
+/** M10 §14: runs one pass of the reconciliation job synchronously. */
+export async function runReconciliation(): Promise<{ missing: number }> {
+  const res = await fetch(`${BACKEND_URL}/internal/reconcile/run`, { method: 'POST' });
+  return (await res.json()) as { missing: number };
+}
+
 /** Entry shape returned by `GET /batches/:batchKey` (M8 §12.3-12.8). */
 export interface ManifestEntry {
   id: string;

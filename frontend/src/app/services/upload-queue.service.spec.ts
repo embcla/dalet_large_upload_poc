@@ -585,6 +585,56 @@ describe('UploadQueueService', () => {
     });
   });
 
+  describe('missing (M10 §14)', () => {
+    it('displayStatus reflects a missing event pushed over SSE for an active item (§14.3)', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      progressService.emit({ uploadId: 'u1', status: 'missing', bytesReceived: 100, bytesTotal: 100 });
+
+      expect(service.displayStatus(service.items()[0])).toBe('missing');
+    });
+
+    it('treats a missing manifest entry as a fresh upload, not a resume (§14.7)', async () => {
+      const file = makeFile('a.mp4', 100);
+      const [sorted] = sortFingerprint([file]);
+      const batchKey = await computeBatchKey([sorted]);
+      manifestResponses.set(batchKey, [
+        {
+          id: 'prev-missing',
+          filename: 'a.mp4',
+          size: 100,
+          lastModified: file.lastModified,
+          batchPosition: 0,
+          status: 'missing',
+          bytesReceived: 100,
+          storageKey: 'prev-missing',
+        },
+      ]);
+
+      await service.addFiles([file]);
+
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0].options.uploadUrl).toBeUndefined();
+      expect(service.items()[0].status()).toBe('uploading');
+      expect(service.items()[0].uploadId()).toBeNull();
+    });
+
+    it('removes an item whose displayStatus is missing without any server call (§14.8)', async () => {
+      await service.addFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      progressService.emit({ uploadId: 'u1', status: 'missing', bytesReceived: 100, bytesTotal: 100 });
+      const item = service.items()[0];
+      expect(service.displayStatus(item)).toBe('missing');
+
+      service.cancel(item);
+
+      expect(service.items()).toHaveLength(0);
+      expect(deleteCalls()).toHaveLength(0);
+    });
+  });
+
   describe('hasCancellableItems / Cancel remaining (M9 §13.7/13.8)', () => {
     it('is false for an empty queue and true once a file is queued', async () => {
       expect(service.hasCancellableItems()).toBe(false);

@@ -68,7 +68,7 @@ export class UploadQueue implements OnInit {
     this.queue.cancel(item);
   }
 
-  /** Whether the per-row "x" cancel button is shown for `item` (M9 §13.11). */
+  /** Whether the per-row "x" cancel button is shown for `item` (M9 §13.11, M10 §14.8). */
   showCancelButton(item: QueueItem): boolean {
     const status = this.displayStatus(item);
     return (
@@ -77,7 +77,8 @@ export class UploadQueue implements OnInit {
       status === 'paused' ||
       status === 'error' ||
       status === 'abandoned' ||
-      status === 'cancelled'
+      status === 'cancelled' ||
+      status === 'missing'
     );
   }
 

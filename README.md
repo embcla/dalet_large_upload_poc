@@ -152,6 +152,33 @@ protocol. This repo currently implements:
     simply surfaces as an upload error to that one client) instead of
     crashing every other upload in flight.
 
+- **M10** — MinIO object reconciliation (§14): a backend interval job,
+  `startReconciliationInterval` (every `RECONCILIATION_INTERVAL_MS`, default
+  5s, overridable via env), runs a single `ListObjectsV2Command` against the
+  bucket and compares the resulting key set against every `status: 'success'`
+  row's `storage_key`. A `success` row whose object is gone is marked with a
+  new terminal status, `missing`, and broadcast over the existing M5 SSE
+  channel as `{ uploadId, status: 'missing', bytesReceived, bytesTotal }`; a
+  `POST /internal/reconcile/run` test-support endpoint (mirrors
+  `/internal/cleanup/run`) runs one pass synchronously and returns
+  `{ missing: <count> }`. Non-`success` rows are never touched, regardless of
+  bucket contents. Bucket objects with no matching `success` row's
+  `storage_key` are logged via `console.warn` as orphans, except for
+  `${id}.info` keys — `@tus/s3-store`'s per-upload metadata objects, which
+  would otherwise be flagged on every pass for every upload ever made.
+  - **Frontend (§14.3)**: on a `missing` SSE event, `FilesService` drops the
+    file from the "Uploaded files" list immediately; if it was the file open
+    in the player, `app-files-list` shows "File no longer available." instead
+    of the `<video>`/"preview not available" states.
+  - **§14.7 (M8 interaction)**: a `missing` entry in a batch manifest is
+    treated like `abandoned`/`error` — re-selecting the file starts a fresh
+    upload rather than attempting to resume.
+  - **§14.8 (M9 interaction)**: a `missing` queue item still shows the `×`
+    button; clicking it just removes the local ghost entry (no server call),
+    same as `queued`/`cancelled`.
+  - See `backend/src/reconciliation.test.ts`, `tests/integration/m10-reconciliation.test.ts`,
+    and `tests/e2e/m10-reconciliation.spec.ts`.
+
 ## Repo layout
 
 ```
@@ -393,6 +420,16 @@ a time (SSE `cancelled` event observed for the in-progress row), leaving an
 already-`success` row in the same batch untouched; an unknown/empty batch key
 is a no-op `204`.
 
+`m10-reconciliation.test.ts` (§14) uploads a file to completion, deletes its
+object directly from MinIO (`deleteObjects`, out-of-band, bypassing the
+backend), then `POST /internal/reconcile/run`s and asserts the row becomes
+`missing` with a matching SSE event. A second upload left untouched in the
+bucket stays `success` with no `missing` event after a reconciliation pass.
+An aborted (non-`success`) upload's row is unchanged by reconciliation
+regardless of bucket state. A final test confirms idempotency: once a row is
+`missing`, a second reconciliation pass reports `missing: 0` and produces no
+additional SSE event for that row.
+
 ```sh
 cd tests
 npm install
@@ -462,3 +499,9 @@ confirms "No" dismisses the confirmation with no effect, then "Yes, cancel"
 drops the queued item, cancels the in-progress item
 (`Cancelling…`/`Cancelled`), and leaves the already-completed item's "Upload
 complete" untouched.
+
+`m10-reconciliation.spec.ts` (§14.3) uploads `compatible.mp4` via the UI,
+selects it to open the player, then deletes its object directly from MinIO
+and triggers `POST /internal/reconcile/run`. It asserts the file disappears
+from the "Uploaded files" list and the player area shows "File no longer
+available." instead of the `<video>` element.

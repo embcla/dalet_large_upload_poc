@@ -3,6 +3,7 @@ import { config } from './config';
 import { runMigrations } from './db';
 import { createDatastore } from './tus';
 import { startCleanupInterval } from './cleanup';
+import { startReconciliationInterval } from './reconciliation';
 
 // M9 §13: a DELETE /uploads/:id (cancel) can race an in-flight PATCH's S3
 // multipart part upload (both touching the same MinIO multipart upload).
@@ -31,3 +32,4 @@ app.listen(config.port, () => {
 });
 
 startCleanupInterval(createDatastore(), config.cleanupIntervalMs);
+startReconciliationInterval(config.reconciliationIntervalMs);

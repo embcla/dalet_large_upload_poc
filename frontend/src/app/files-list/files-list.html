@@ -3,7 +3,9 @@
 
   <div class="player">
     @if (selected(); as file) {
-      @if (file.playable) {
+      @if (fileMissing()) {
+        <p class="message message--missing">File no longer available.</p>
+      } @else if (file.playable) {
         <video [src]="streamUrl(file.id)" controls muted></video>
       } @else {
         <p class="message message--error">Preview not available for this format.</p>

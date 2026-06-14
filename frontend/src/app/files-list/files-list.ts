@@ -1,4 +1,4 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnInit, effect, inject, signal } from '@angular/core';
 import { environment } from '../../environments/environment';
 import { FileItem, FilesService } from '../services/files.service';
 import { formatDuration, formatSize } from '../upload-utils';
@@ -18,12 +18,25 @@ export class FilesList implements OnInit {
 
   readonly selected = signal<FileItem | null>(null);
 
+  /** M10 §14.3: set when the selected file's object has disappeared from the bucket. */
+  readonly fileMissing = signal(false);
+
+  constructor() {
+    effect(() => {
+      const selected = this.selected();
+      if (selected && !this.filesService.files().some((file) => file.id === selected.id)) {
+        this.fileMissing.set(true);
+      }
+    });
+  }
+
   ngOnInit(): void {
     this.filesService.refresh();
   }
 
   selectFile(file: FileItem): void {
     this.selected.set(file);
+    this.fileMissing.set(false);
   }
 
   streamUrl(id: string): string {

@@ -267,4 +267,18 @@ describe('UploadQueue', () => {
       expect(confirmAllSpy).toHaveBeenCalled();
     });
   });
+
+  describe('missing (M10 §14)', () => {
+    it('shows a cancel button and the "file no longer available" message for a missing item (§14.8)', async () => {
+      await selectFiles([makeFile('a.mp4', 100)]);
+      makeUploadUrlAvailable(uploads[0], 'u1');
+
+      progressService.emit({ uploadId: 'u1', status: 'missing', bytesReceived: 100, bytesTotal: 100 });
+      fixture.detectChanges();
+
+      const item = fixture.nativeElement.querySelector('.queue-item');
+      expect(item.querySelector('.cancel-btn')).not.toBeNull();
+      expect(item.querySelector('.message--missing')?.textContent).toContain('File no longer available');
+    });
+  });
 });

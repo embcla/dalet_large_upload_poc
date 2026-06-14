@@ -9,7 +9,7 @@ import { environment } from '../../environments/environment';
  */
 export interface ProgressEvent {
   uploadId: string;
-  status: 'uploading' | 'paused' | 'success' | 'error' | 'abandoned' | 'cancelled';
+  status: 'uploading' | 'paused' | 'success' | 'error' | 'abandoned' | 'cancelled' | 'missing';
   bytesReceived: number;
   bytesTotal: number;
   message?: string;

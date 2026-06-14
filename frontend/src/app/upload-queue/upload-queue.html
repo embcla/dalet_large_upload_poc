@@ -99,6 +99,9 @@
                 <span class="status-icon" aria-hidden="true">&#10007;</span> Cancelled
               </p>
             }
+            @case ('missing') {
+              <p class="message message--missing">File no longer available</p>
+            }
           }
         </li>
       }

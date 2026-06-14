@@ -8,6 +8,10 @@ export const HEARTBEAT_TIMEOUT_SECONDS = 90;
 // How often the cleanup job scans for stale sessions.
 export const CLEANUP_INTERVAL_MS = 60 * 1000;
 
+// M10 §14.1: how often the reconciliation job compares `success` rows
+// against the actual contents of the MinIO bucket.
+export const RECONCILIATION_INTERVAL_MS = 5 * 1000;
+
 // M5 §9.4: throttles how often POST_RECEIVE_V2 emits a `progress` SSE event
 // (and updates the bytes_received column) per upload, in ms.
 export const PROGRESS_THROTTLE_MS = 300;
@@ -27,6 +31,7 @@ export const config = {
 
   heartbeatTimeoutSeconds: Number(process.env.HEARTBEAT_TIMEOUT_SECONDS ?? HEARTBEAT_TIMEOUT_SECONDS),
   cleanupIntervalMs: Number(process.env.CLEANUP_INTERVAL_MS ?? CLEANUP_INTERVAL_MS),
+  reconciliationIntervalMs: Number(process.env.RECONCILIATION_INTERVAL_MS ?? RECONCILIATION_INTERVAL_MS),
 
   progressThrottleMs: Number(process.env.PROGRESS_THROTTLE_MS ?? PROGRESS_THROTTLE_MS),
   progressKeepaliveMs: Number(process.env.PROGRESS_KEEPALIVE_MS ?? PROGRESS_KEEPALIVE_MS),

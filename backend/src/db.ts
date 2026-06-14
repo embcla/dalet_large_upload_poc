@@ -17,7 +17,7 @@ export function getDb(): Database.Database {
   return db;
 }
 
-export type UploadStatus = 'uploading' | 'paused' | 'success' | 'error' | 'abandoned' | 'cancelled';
+export type UploadStatus = 'uploading' | 'paused' | 'success' | 'error' | 'abandoned' | 'cancelled' | 'missing';
 
 export interface UploadRow {
   id: string;

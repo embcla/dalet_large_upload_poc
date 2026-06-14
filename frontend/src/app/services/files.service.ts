@@ -41,6 +41,16 @@ export class FilesService {
         if (event.status === 'success' && !this.seenSuccessIds.has(event.uploadId)) {
           this.seenSuccessIds.add(event.uploadId);
           this.refresh();
+        } else if (event.status === 'missing') {
+          // M10 §14.3: the backing object is gone — drop it from the list
+          // without waiting for a manual refresh. Only write if something
+          // would actually change: `.filter()` always returns a new array,
+          // and writing unconditionally would re-trigger this effect (which
+          // reads `this.files()`) forever.
+          const current = this.files();
+          if (current.some((file) => file.id === event.uploadId)) {
+            this.files.set(current.filter((file) => file.id !== event.uploadId));
+          }
         }
       }
     });
