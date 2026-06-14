@@ -3,7 +3,8 @@ import { EVENTS } from '@tus/utils';
 import { S3Store } from '@tus/s3-store';
 import type { Request, Response, NextFunction } from 'express';
 import { config, isAcceptedExtension } from './config';
-import { insertUpload, markUploadStatus, setBytesReceived } from './db';
+import { insertUpload, markUploadStatus, setBytesReceived, setProbedMetadata } from './db';
+import { probeObject } from './ffprobe';
 import { broadcast } from './progress';
 
 export function createDatastore(): S3Store {
@@ -53,6 +54,14 @@ export function createTusHandler(datastore: S3Store) {
     async onUploadFinish(_req, res, upload) {
       markUploadStatus(upload.id, 'success');
       setBytesReceived(upload.id, upload.size ?? 0);
+
+      // M7 §11: probe the completed object for duration/resolution/codec and
+      // classify it as `playable` before broadcasting `success`, so the
+      // frontend's SSE-triggered `GET /files` refetch sees full metadata.
+      const filename = upload.metadata?.filename ?? '';
+      const probeResult = await probeObject(upload.id, filename);
+      setProbedMetadata(upload.id, probeResult);
+
       broadcast({
         uploadId: upload.id,
         status: 'success',

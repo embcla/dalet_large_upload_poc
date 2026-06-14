@@ -1,8 +1,7 @@
 import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { ProgressService } from '../services/progress.service';
 import { QueueItem, UploadQueueService, UploadStatus } from '../services/upload-queue.service';
-
-const SIZE_UNITS = ['B', 'KB', 'MB', 'GB'];
+import { formatSize } from '../upload-utils';
 
 @Component({
   selector: 'app-upload-queue',
@@ -56,12 +55,7 @@ export class UploadQueue implements OnInit, OnDestroy {
   }
 
   formatSize(bytes: number): string {
-    if (bytes <= 0) {
-      return '0 B';
-    }
-    const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), SIZE_UNITS.length - 1);
-    const value = bytes / 1024 ** exponent;
-    return `${exponent === 0 ? value : value.toFixed(1)} ${SIZE_UNITS[exponent]}`;
+    return formatSize(bytes);
   }
 
   pause(): void {

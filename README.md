@@ -60,8 +60,23 @@ protocol. This repo currently implements:
   in-memory only — a full page reload mid-batch loses the queue and requires
   restarting the batch selection from scratch. M8 will remove this limitation
   via the server-held batch manifest and cross-reload resume (§2.12).
+- **M7** — uploaded files visualization & playback (§11): a two-column
+  layout adds a right-hand "Uploaded files" panel (`app-files-list`) next to
+  the M6 upload queue. On `onUploadFinish`, the backend runs `ffprobe`
+  against the completed object (via a short-lived presigned MinIO URL) to
+  extract duration/resolution/codec, and classifies the file as `playable`
+  against a browser-compatible codec allowlist (§2.7): `.mp4` requires
+  `h264`(+`aac`/no audio), `.webm` requires `vp8`/`vp9`/`av1`; `.mkv` is
+  accepted for upload (§2.9) but never `playable` regardless of inner codec,
+  since browsers don't render `video/x-matroska`. `GET /files` lists
+  completed uploads with this metadata; `GET /files/:id/stream` proxies the
+  MinIO object with HTTP Range support (`206`/`Content-Range`/
+  `Accept-Ranges`) for `<video>` seeking. The files panel auto-refreshes via
+  the existing M5 SSE channel (on each new `success` event) and shows a
+  `<video>` player for `playable` files or a "Preview not available" message
+  otherwise.
 
-M7 (playback/streaming) is not yet implemented.
+M8 (cross-reload batch resume, §12) is not yet implemented.
 
 ## Repo layout
 
@@ -77,6 +92,7 @@ build/              Thin docker build wrappers (build-backend.sh, build-frontend
 tests/
   integration/      Jest tests against the running docker-compose stack
   e2e/              Playwright UI test
+  fixtures/         M7 test video fixtures (compatible.mp4, incompatible.mkv)
   generators/       Test file generator (fallocate-based)
 docker-compose.yml
 .env                Local-dev credentials/config used by docker-compose
@@ -247,6 +263,17 @@ abort+resume cycle the SSE stream shows the upload as `uploading` (stalled at
 the abort offset, no spurious `success`/`error`/`abandoned`), then resumes to
 a single final `success` event with `bytesReceived === bytesTotal`.
 
+`m7-files.test.ts` (§11) uploads the `tests/fixtures/compatible.mp4` and
+`incompatible.mkv` fixtures and asserts the post-upload `ffprobe` metadata
+exposed via `GET /files`: the compatible file reports `duration≈2`,
+`resolution: "320x240"`, a `codec` containing `h264`/`aac`, and
+`playable: true`; the incompatible file reports a `codec` containing
+`mpeg2video` and `playable: false`. It also checks `GET /files/:id/stream`:
+a `Range: bytes=0-1023` request returns `206` with
+`Content-Range: bytes 0-1023/<size>` and a 1024-byte body, while a plain
+request returns `200` with `Accept-Ranges: bytes` and the full
+`Content-Length`.
+
 ```sh
 cd tests
 npm install
@@ -286,3 +313,12 @@ causes the page (via the SSE push, with no user action) to show the
 aggregate progress bar reaches 100%. It then captures each upload's id from
 the `Location` header of its `POST /uploads` response and confirms the
 resulting MinIO objects' checksums match the source files.
+
+`m7-playback.spec.ts` (§11) uploads `compatible.mp4` via the M6 queue UI and,
+without reloading the page, confirms it auto-appears in the right-hand
+"Uploaded files" list (SSE-driven `GET /files` refresh) with a `Playable`
+badge; clicking the row shows a `<video>` element whose `src` points at
+`/files/:id/stream`, and exercises `play()` and seeking (`currentTime`) to
+validate Range support end-to-end. It then uploads `incompatible.mkv` and
+confirms its row shows a `Not playable` badge and, once selected, a "preview
+not available" message with no `<video>` element rendered.

@@ -244,6 +244,120 @@ describe('db', () => {
     });
   });
 
+  describe('M7 schema migration (additive columns, §11)', () => {
+    it('adds the probed-metadata columns to a fresh database', () => {
+      const columns = dbModule
+        .getDb()
+        .prepare(`PRAGMA table_info(uploads)`)
+        .all() as Array<{ name: string }>;
+      const names = columns.map((c) => c.name);
+
+      expect(names).toEqual(
+        expect.arrayContaining([
+          'duration_seconds',
+          'width',
+          'height',
+          'video_codec',
+          'audio_codec',
+          'playable',
+        ]),
+      );
+    });
+
+    it('leaves the probed-metadata columns NULL until set', () => {
+      dbModule.insertUpload({
+        id: 'upload-m7-smoke',
+        filename: 'video.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-m7-smoke',
+      });
+
+      const row = dbModule.getUpload('upload-m7-smoke');
+      expect(row?.duration_seconds).toBeNull();
+      expect(row?.width).toBeNull();
+      expect(row?.height).toBeNull();
+      expect(row?.video_codec).toBeNull();
+      expect(row?.audio_codec).toBeNull();
+      expect(row?.playable).toBeNull();
+    });
+  });
+
+  describe('setProbedMetadata', () => {
+    it('stores probed metadata for an upload', () => {
+      dbModule.insertUpload({
+        id: 'upload-probed',
+        filename: 'video.mp4',
+        size: 1000,
+        mimeType: 'video/mp4',
+        storageKey: 'upload-probed',
+      });
+
+      dbModule.setProbedMetadata('upload-probed', {
+        durationSeconds: 2.5,
+        width: 320,
+        height: 240,
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+        playable: true,
+      });
+
+      const row = dbModule.getUpload('upload-probed');
+      expect(row?.duration_seconds).toBe(2.5);
+      expect(row?.width).toBe(320);
+      expect(row?.height).toBe(240);
+      expect(row?.video_codec).toBe('h264');
+      expect(row?.audio_codec).toBe('aac');
+      expect(row?.playable).toBe(1);
+    });
+
+    it('stores playable: false as 0', () => {
+      dbModule.insertUpload({
+        id: 'upload-not-playable',
+        filename: 'video.mkv',
+        size: 1000,
+        mimeType: 'video/x-matroska',
+        storageKey: 'upload-not-playable',
+      });
+
+      dbModule.setProbedMetadata('upload-not-playable', {
+        durationSeconds: 2,
+        width: 320,
+        height: 240,
+        videoCodec: 'mpeg2video',
+        audioCodec: null,
+        playable: false,
+      });
+
+      expect(dbModule.getUpload('upload-not-playable')?.playable).toBe(0);
+    });
+  });
+
+  describe('getCompletedUploads', () => {
+    it('returns only success rows', () => {
+      dbModule.insertUpload({
+        id: 'done-1',
+        filename: 'a.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'done-1',
+      });
+      dbModule.markUploadStatus('done-1', 'success');
+
+      dbModule.insertUpload({
+        id: 'in-progress-1',
+        filename: 'b.mp4',
+        size: 10,
+        mimeType: 'video/mp4',
+        storageKey: 'in-progress-1',
+      });
+
+      const rows = dbModule.getCompletedUploads();
+
+      expect(rows.map((row) => row.id)).toEqual(['done-1']);
+    });
+  });
+
   describe('getStaleUploads', () => {
     it('returns only in-progress uploads whose last_seen exceeds the timeout', () => {
       dbModule.insertUpload({

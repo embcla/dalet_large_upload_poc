@@ -1,0 +1,40 @@
+<section class="files">
+  <h2>Uploaded files</h2>
+
+  <div class="player">
+    @if (selected(); as file) {
+      @if (file.playable) {
+        <video [src]="streamUrl(file.id)" controls muted></video>
+      } @else {
+        <p class="message message--error">Preview not available for this format.</p>
+      }
+    } @else {
+      <p class="placeholder">Select a file to preview.</p>
+    }
+  </div>
+
+  @if (filesService.files().length === 0) {
+    <p class="empty-state">No uploaded files yet.</p>
+  } @else {
+    <ul class="files-list">
+      @for (file of filesService.files(); track file.id) {
+        <li class="file-item" [class.selected]="selected()?.id === file.id" (click)="selectFile(file)">
+          <p class="file-name">{{ file.filename }}</p>
+          <span class="file-size">{{ formatSize(file.size) }}</span>
+          <span class="file-duration">{{ formatDuration(file.duration) }}</span>
+          @if (file.resolution) {
+            <span class="file-resolution">{{ file.resolution }}</span>
+          }
+          @if (file.codec) {
+            <span class="file-codec">{{ file.codec }}</span>
+          }
+          @if (file.playable) {
+            <span class="badge badge--playable">Playable</span>
+          } @else {
+            <span class="badge badge--unplayable">Not playable</span>
+          }
+        </li>
+      }
+    </ul>
+  }
+</section>

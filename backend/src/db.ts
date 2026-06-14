@@ -36,6 +36,12 @@ export interface UploadRow {
   client_file_hash: string | null;
   server_file_hash: string | null;
   hash_verified: number | null;
+  duration_seconds: number | null;
+  width: number | null;
+  height: number | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  playable: number | null;
 }
 
 /**
@@ -52,6 +58,12 @@ const ADDITIVE_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: 'client_file_hash', ddl: 'client_file_hash TEXT' },
   { name: 'server_file_hash', ddl: 'server_file_hash TEXT' },
   { name: 'hash_verified', ddl: 'hash_verified BOOLEAN' },
+  { name: 'duration_seconds', ddl: 'duration_seconds REAL' },
+  { name: 'width', ddl: 'width INTEGER' },
+  { name: 'height', ddl: 'height INTEGER' },
+  { name: 'video_codec', ddl: 'video_codec TEXT' },
+  { name: 'audio_codec', ddl: 'audio_codec TEXT' },
+  { name: 'playable', ddl: 'playable INTEGER' },
 ];
 
 export function runMigrations(): void {
@@ -160,4 +172,53 @@ export function getStaleUploads(timeoutSeconds: number): UploadRow[] {
          AND (strftime('%s', 'now') - strftime('%s', last_seen)) > @timeoutSeconds`,
     )
     .all({ timeoutSeconds }) as UploadRow[];
+}
+
+/**
+ * Stores `ffprobe`-derived metadata for a completed upload (M7 §11), used by
+ * `GET /files` to report duration/resolution/codec and the `playable` flag.
+ */
+export function setProbedMetadata(
+  id: string,
+  metadata: {
+    durationSeconds: number | null;
+    width: number | null;
+    height: number | null;
+    videoCodec: string | null;
+    audioCodec: string | null;
+    playable: boolean;
+  },
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `UPDATE uploads
+       SET duration_seconds = @durationSeconds,
+           width = @width,
+           height = @height,
+           video_codec = @videoCodec,
+           audio_codec = @audioCodec,
+           playable = @playable
+       WHERE id = @id`,
+    )
+    .run({
+      id,
+      durationSeconds: metadata.durationSeconds,
+      width: metadata.width,
+      height: metadata.height,
+      videoCodec: metadata.videoCodec,
+      audioCodec: metadata.audioCodec,
+      playable: metadata.playable ? 1 : 0,
+    });
+}
+
+/**
+ * Returns all successfully completed uploads (M7 §11 `GET /files`), most
+ * recent first.
+ */
+export function getCompletedUploads(): UploadRow[] {
+  const database = getDb();
+  return database
+    .prepare(`SELECT * FROM uploads WHERE status = 'success' ORDER BY created_at DESC`)
+    .all() as UploadRow[];
 }

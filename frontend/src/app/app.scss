@@ -1,0 +1,11 @@
+.layout {
+  display: flex;
+  gap: 1rem;
+}
+
+.column {
+  flex: 1;
+  min-width: 0;
+  height: 70vh;
+  overflow-y: auto;
+}
