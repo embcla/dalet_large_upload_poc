@@ -17,15 +17,22 @@ run() {
   else
     STATUS[$name]="FAIL"
   fi
-  DETAIL[$name]=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOGDIR/$name.log" | grep -E -i "tests?:|passed|failed" | tail -1 | sed -E 's/^[[:space:]]+//')
+  # Jest prints "Tests:", Vitest prints "     Tests  " (no colon) - both as a
+  # single summary line; Playwright prints separate "N failed"/"N passed
+  # (Xs)"/"N skipped" lines. Match all three forms and join them so a
+  # Playwright failure shows e.g. "1 failed, 7 passed (6.1s)" instead of just
+  # the trailing "7 passed (6.1s)" (which looked like a pass).
+  DETAIL[$name]=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOGDIR/$name.log" \
+    | grep -E -i '^([[:space:]]*Tests[[:space:]:]|[[:space:]]*[0-9]+ (failed|passed|skipped|flaky|interrupted))' \
+    | sed -E 's/^[[:space:]]+//' | paste -sd, - | sed 's/,/, /g')
 }
 
 # To add a new suite (e.g. M3's toxiproxy scenario tests, M4 batch, ...):
 #   1. add its name to SUITES above
 #   2. add a `run <name> <dir> <command...>` line below
-# The suite must exit non-zero on failure and print a summary line
-# containing "passed"/"failed"/"tests:" (case-insensitive) for the detail
-# column - true of Jest, Vitest and Playwright's default reporters.
+# The suite must exit non-zero on failure and print a summary line matching
+# "Tests:" (Jest/Vitest) or "N failed"/"N passed (Xs)"/"N skipped"
+# (Playwright's default reporter) for the detail column.
 
 run backend-unit  backend  npm test --silent
 
