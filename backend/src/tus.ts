@@ -95,8 +95,10 @@ export function createTusHandler(datastore: S3Store) {
     },
   });
 
-  // M5 §9.4: emits a throttled progress event (and persists bytes_received)
-  // as bytes are written, via POST_RECEIVE_V2 (the non-deprecated event).
+  // M5 §9.4: emits a throttled progress event (and keeps bytes_received fresh
+  // during a long PATCH) as bytes are written, via POST_RECEIVE_V2 (the
+  // non-deprecated event; the deprecated POST_RECEIVE has an incompatible
+  // (req, res, upload) signature).
   //
   // M9 §13: a chunk that was in flight when the upload got cancelled can
   // still finish writing and fire this event afterwards. If it broadcast
@@ -116,17 +118,6 @@ export function createTusHandler(datastore: S3Store) {
     });
   });
 
-  // M8 §12.3-12.8: also persists bytes_received on every PATCH completion —
-  // a PATCH smaller than one POST_RECEIVE_V2 throttle tick (e.g. a small
-  // resumed chunk) would otherwise leave bytes_received stale for the batch
-  // manifest.
-  server.on(EVENTS.POST_RECEIVE, (_req, _res, upload) => {
-    if (getUpload(upload.id)?.status === 'cancelled') {
-      return;
-    }
-    setBytesReceived(upload.id, upload.offset);
-  });
-
   return (req: Request, res: Response, _next: NextFunction) => {
     // `server.handle` returns a promise that can reject if its own internal
     // error-response write fails (e.g. a concurrent DELETE/abort races an
@@ -141,5 +132,29 @@ export function createTusHandler(datastore: S3Store) {
         res.end();
       }
     });
+
+    // M8 §12.3-12.8: POST_RECEIVE_V2 above is throttled (postReceiveInterval),
+    // so a PATCH that completes faster than one throttle tick can leave
+    // bytes_received stale for the batch manifest. Per the tus protocol, a
+    // successful PATCH writes exactly `Content-Length` bytes starting at the
+    // request's `Upload-Offset` header, so the new offset is computable
+    // synchronously here on response finish, without a deprecated event.
+    if (req.method === 'PATCH') {
+      res.once('finish', () => {
+        if (res.statusCode !== 204) {
+          return;
+        }
+        const id = req.params[0];
+        const startOffset = Number(req.headers['upload-offset']);
+        const chunkLength = Number(req.headers['content-length']);
+        if (!id || Number.isNaN(startOffset) || Number.isNaN(chunkLength)) {
+          return;
+        }
+        if (getUpload(id)?.status === 'cancelled') {
+          return;
+        }
+        setBytesReceived(id, startOffset + chunkLength);
+      });
+    }
   };
 }
